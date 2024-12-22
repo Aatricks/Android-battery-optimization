@@ -249,5 +249,5 @@ by launching the power-saving.bat and settings.bat files.
 ### If you came this far, thanks a lot and starring this repository would be really helpful
 
 > [!TIP]
-> If you decide to root, Install the [FDE.AI](https://github.com/feravolt/FDE.AI-docs) magisk module additionnaly to the tweaks and you should have the best battery life possible. 
+> If you decide to root, Install the SetCPU app additionnaly to the tweaks and you should have the best battery life possible. 
 > if you only root using magisk you should still be able to use your phone as before including banking and payments apps except for knox-reliant ones like samsung-pay.
