@@ -72,9 +72,9 @@ adb shell settings put global dynamic_power_savings_disable_threshold 20
 adb shell settings put global zram_enabled 0
 adb shell settings put global accessibility_reduce_transparency 1
 adb shell settings put global disable_window_blurs 1
-adb shell settings put global window_animation_scale 0.0
-adb shell settings put global transition_animation_scale 0.0
-adb shell settings put global animator_duration_scale 0.0
+adb shell settings put global window_animation_scale 0.5
+adb shell settings put global transition_animation_scale 0.5
+adb shell settings put global animator_duration_scale 0.5
 adb shell settings put system screen_auto_brightness_adj 1.0
 
 adb shell settings put global network_recommendations_enabled 0
@@ -128,7 +128,6 @@ adb shell settings put system persist.sys_emc_mode power_saving
 adb shell settings put system cpu_max_speed 0
 adb shell settings put system speed_mode 0
 
-adb shell settings put global airplane_mode_on 1
 adb shell settings put global wfc_ims_mode 2
 adb shell settings put global sem_low_heat_mode 1
 
