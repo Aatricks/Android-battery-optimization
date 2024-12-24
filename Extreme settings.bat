@@ -4,7 +4,6 @@ adb shell dumpsys deviceidle force-idle
 
 adb shell settings put system multicore_packet_scheduler 1
 adb shell settings put system minimal_battery_use 1
-adb shell settings put global sem_power_mode_limited_apps_and_home_screen 1
 adb shell settings put global apm_enhancement_enabled 0
 
 adb shell settings put global ble_scan_always_enabled 0
