@@ -1,6 +1,9 @@
 # -NO-ROOT-battery-optimization
 Here's a repo including diverse adb shells to maximize battery life and sot on non-rooted android
 
+⭐ If this project helps you, please give it a star! It helps others discover it too.
+---
+
 ## For starters
 
 Download the latest version of the [android platform tools](https://developer.android.com/tools/releases/platform-tools), you'll need it to use adb commands.
@@ -8,7 +11,7 @@ Download the latest version of the [android platform tools](https://developer.an
 Now go into your phone developpers settings, enable the USB debugging setting and plug your phone into your computer.
 
 First off it is highly recommended to install the [Greenify](https://play.google.com/store/apps/details?id=com.oasisfeng.greenify) app  and set the apps to hibernate and enable the Aggressive doze and wake-up tracking
-To set up those two settings you'll have to grant some permissions to greenify via the adb (Android Device Bridge)
+To set up those two settings you'll have to grant some permissions to greenify via the adb (Android Debug Bridge)
 
 ``adb -d shell pm grant com.oasisfeng.greenify android.permission.WRITE_SECURE_SETTINGS``
 
