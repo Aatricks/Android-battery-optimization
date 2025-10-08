@@ -1,7 +1,6 @@
 # -NO-ROOT-battery-optimization
 Here's a repo including diverse adb shells to maximize battery life and sot on non-rooted android
 
-⭐ If this project helps you, please give it a star! It helps others discover it too.
 ---
 
 ## For starters
@@ -249,7 +248,7 @@ Freeze every app you don't use, enable auto freeze by greenify and create an unf
 by launching the power-saving.bat and settings.bat files.
 
 
-### If you came this far, thanks a lot and starring this repository would be really helpful
+### ⭐ If you came this far, thanks a lot. Consider starring this repo to help others find it !
 
 > [!TIP]
 > If you decide to root, using magisk you should still be able to use your phone as before including banking and payments apps except for knox-reliant ones like samsung-pay.
