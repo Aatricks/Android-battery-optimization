@@ -46,9 +46,19 @@ def check_battery():
     output = adb_shell("dumpsys battery")
     print(output)
     
-    print("\n--- Top Apps (Battery Stats - Summary) ---")
-    output = adb_shell("dumpsys batterystats --short")
-    print(output if output else "No stats available.")
+    print("\n--- Power Consumption Summary (Since Charged) ---")
+    output = adb_shell("dumpsys batterystats --charged")
+    found_summary = False
+    for line in output.splitlines():
+        if "Estimated power use" in line or "Capacity:" in line or "Computed drain:" in line:
+            print(line.strip())
+            found_summary = True
+        elif found_summary and (" mAh" in line or ":" in line):
+            if "Estimated power use" not in line and not line.startswith("  "):
+                if " mAh" not in line:
+                   found_summary = False
+                   continue
+            print(line.strip())
 
 def optimize_doze(aggressive=False):
     print(f"Optimizing Doze Mode (Aggressive: {aggressive})...")
@@ -107,7 +117,6 @@ def manage_whitelist():
         if choice == "1":
             pkg = input("Enter package name to add (or part of it to search): ")
             if "." not in pkg:
-                # Search
                 all_pkgs = get_packages(third_party=True)
                 matches = [p for p in all_pkgs if pkg in p]
                 if not matches:
@@ -161,13 +170,30 @@ def optimize_samsung():
         return
     print("Applying Samsung-specific optimizations...")
     samsung_settings = {
-        "system": {"master_motion": "0", "motion_engine": "0", "mcf_continuity": "0"},
-        "global": {"sem_enhanced_cpu_responsiveness": "0", "ram_expand_size": "0"}
+        "system": {
+            "master_motion": "0", 
+            "motion_engine": "0", 
+            "mcf_continuity": "0",
+            "adaptive_fast_charging": "1",
+            "p_battery_charging_efficiency": "1"
+        },
+        "global": {
+            "sem_enhanced_cpu_responsiveness": "0", 
+            "ram_expand_size": "0",
+            "cached_apps_freezer": "enabled"
+        },
+        "secure": {
+            "vibration_on": "0",
+            "refresh_rate_mode": "0"
+        }
     }
     for ns, kv in samsung_settings.items():
         for k, v in kv.items():
             adb_shell(f"settings put {ns} {k} {v}")
-    print("Samsung optimizations applied.")
+    
+    adb_shell("pm disable-user --user 0 com.samsung.android.game.gos")
+    adb_shell("pm disable-user --user 0 com.samsung.android.game.gamelab")
+    print("Samsung optimizations applied (including GOS disable).")
 
 def revert_all():
     print("Reverting all changes...")
@@ -178,6 +204,12 @@ def revert_all():
     restrict_background_apps(level="allow")
     adb_shell("settings put global ble_scan_always_enabled 1")
     adb_shell("settings put global mobile_data_always_on 1")
+    
+    brand = adb_shell("getprop ro.product.brand")
+    if brand.lower() == "samsung":
+        adb_shell("pm enable com.samsung.android.game.gos")
+        adb_shell("pm enable com.samsung.android.game.gamelab")
+        
     print("Revert complete.")
 
 def main():
@@ -210,8 +242,6 @@ def main():
         elif choice == "6": optimize_samsung()
         elif choice == "7": revert_all()
         elif choice == "8": break
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()

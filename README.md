@@ -171,33 +171,15 @@ python3 optimizer.py
 ./optimize.sh
 ```
 
----
+## Whitelist
 
-## Older Scripts (Legacy)
-The original batch files are still available for those who prefer them:
+You can exclude specific apps (like Spotify or WhatsApp) from being restricted by adding them to the whitelist in the optimizer menu. This ensures you still get notifications or background playback from apps you need while optimizing everything else.
 
-Place the bg-restriction.bat file into the platform tools folder
-Open a command prompt in the platform tools and type
+### Revert
 
-``adb devices``
+If you want to undo all changes made by the script, simply select the **Revert All Changes** option in the menu. This will reset Doze parameters, animations, and background restrictions to system defaults.
 
-You should see a list of devices connected and there should be your phone's serial number in it
 
-Now simply open the bat file and it should set it all up for you
-
-Additionally you can remove the background usage permission of an app with 
-
-``adb shell cmd appops set <PACKAGE_NAME> WAKE_LOCK ignore``
-
-and 
-
-``adb shell cmd appops set <PACKAGE_NAME> RUN_ANY_IN_BACKGROUND ignore``
-
-you can get app permission for background usage with
-
-``adb shell cmd appops get <PACKAGE_NAME>``
-
-To revert the changes simply put allow instead of ignore
 
 
 
