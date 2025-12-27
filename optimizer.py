@@ -184,7 +184,8 @@ def optimize_samsung():
         },
         "secure": {
             "vibration_on": "0",
-            "refresh_rate_mode": "0"
+            "refresh_rate_mode": "1", # Adaptive/High refresh rate (up to 120Hz)
+            "min_refresh_rate": "10.0" # Allow it to drop low to save battery when idle
         }
     }
     for ns, kv in samsung_settings.items():
