@@ -180,7 +180,8 @@ def optimize_samsung():
         "global": {
             "sem_enhanced_cpu_responsiveness": "0", 
             "ram_expand_size": "0",
-            "cached_apps_freezer": "enabled"
+            "cached_apps_freezer": "enabled",
+            "restricted_device_performance": "1,1" # Limit CPU speed to 70%
         },
         "secure": {
             "vibration_on": "0",
