@@ -150,44 +150,31 @@ On the other hand you can restrict and delete most permissions (like the sensors
 
 
 
-## doze mode optimization
+## Unified Optimizer (Recommended)
 
-Doze mode reduces battery consumption by deferring background CPU and network activity for apps when the device is unused for long periods of time. Please do refer to the [official doze and standby page](https://developer.android.com/training/monitoring-device-state/doze-standby) from the android documentation
+A new, comprehensive Python-based optimizer has been added to replace the fragmented batch files. It works on Linux, macOS, and Windows.
 
-Place the battery opt.bat file into the platform tools folder
-Open a command prompt in the platform tools and type
-``adb devices``
+### Features
+- **Dynamic Package Detection**: Automatically finds 3rd party apps (no manual list needed).
+- **Whitelist Support**: Protect your favorite apps from background restrictions.
+- **Categorized Optimizations**: Safe vs Aggressive modes.
+- **Samsung Specifics**: Targeted fixes for Samsung device drains.
+- **Battery Status**: Live view of your battery and top drainers.
+- **Easy Revert**: One-click rollback of all ADB changes.
 
-You should see a list of devices connected and there should be your phone's serial number in it
+### Usage
+Ensure you have Python installed and your device is connected via ADB.
 
-Now simply open the bat file and it should set it all up for you
+```bash
+python3 optimizer.py
+# or on Linux
+./optimize.sh
+```
 
-Just to be sure of the persistency of the settings you should additionally enter the command
+---
 
-``adb shell device_config set_sync_disabled_for_tests persistent``
-
-For explanation on what each setting does please do refer to the deviceidle-settings-ex.txt file which is an extract of the source code of the android [DeviceIdleController.java](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android10-c2f2-release/services/core/java/com/android/server/DeviceIdleController.java)
-
-
-### Whitelist
-
-Additionally you can remove packages from the sys-whitelist keeping them away from waking up your phone
-
-``adb shell dumpsys deviceidle sys-whitelist -<PACKAGE_NAME>``
-
-To add it back simply change the - in a +
-
-Note that you can only put into whitelist apps that were already in
-
-
-### Revert
-
-to revert the changes entirely type in :
-
-``adb shell settings delete global device_idle_constants``
-
-
-## app battery restrictions
+## Older Scripts (Legacy)
+The original batch files are still available for those who prefer them:
 
 Place the bg-restriction.bat file into the platform tools folder
 Open a command prompt in the platform tools and type
