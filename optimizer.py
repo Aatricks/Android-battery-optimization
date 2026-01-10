@@ -199,18 +199,70 @@ def optimize_samsung():
 
 def revert_all():
     print("Reverting all changes...")
+    
+    # 1. Revert Doze settings
+    doze_keys = [
+        "light_after_inactive_to", "light_pre_idle_to", "light_idle_to",
+        "light_idle_factor", "light_max_idle_to", "inactive_to",
+        "sensing_to", "locating_to", "motion_inactive_to",
+        "idle_after_inactive_to", "quick_doze_delay_to"
+    ]
+    for key in doze_keys:
+        adb_shell(f"device_config delete device_idle {key}")
     adb_shell("settings delete global device_idle_constants")
+    
+    # 2. Revert Animation scales
     adb_shell("settings put global window_animation_scale 1.0")
     adb_shell("settings put global transition_animation_scale 1.0")
     adb_shell("settings put global animator_duration_scale 1.0")
-    restrict_background_apps(level="allow")
-    adb_shell("settings put global ble_scan_always_enabled 1")
-    adb_shell("settings put global mobile_data_always_on 1")
     
+    # 3. Revert Connectivity and System settings
+    adb_shell("settings put global ble_scan_always_enabled 1")
+    adb_shell("settings put system nearby_scanning_enabled 1")
+    adb_shell("settings delete global wifi_scan_throttle_enabled")
+    adb_shell("settings put global mobile_data_always_on 1")
+    adb_shell("settings delete global wifi_power_save")
+    adb_shell("settings delete global cached_apps_freezer")
+    adb_shell("settings delete global adaptive_battery_management_enabled")
+    adb_shell("settings delete global battery_saver_constants")
+    adb_shell("settings put global low_power 0")
+    
+    # 4. Revert Device Config optimizations
+    adb_shell("device_config delete activity_manager bg_current_drain_auto_restrict_abusive_apps_enabled")
+    adb_shell("device_config delete app_hibernation app_hibernation_enabled")
+    
+    # 5. Revert Background Restrictions for 3rd party apps
+    restrict_background_apps(level="allow")
+    
+    # 6. Revert Samsung specific changes
     brand = adb_shell("getprop ro.product.brand")
     if brand.lower() == "samsung":
-        adb_shell("pm enable com.samsung.android.game.gos")
-        adb_shell("pm enable com.samsung.android.game.gamelab")
+        print("Reverting Samsung-specific optimizations...")
+        samsung_revert = {
+            "system": {
+                "master_motion": "1", 
+                "motion_engine": "1", 
+                "mcf_continuity": "1",
+                "adaptive_fast_charging": "1",
+                "p_battery_charging_efficiency": "0"
+            },
+            "global": {
+                "sem_enhanced_cpu_responsiveness": "1", 
+                "ram_expand_size": "4",
+                "restricted_device_performance": "0,0"
+            },
+            "secure": {
+                "vibration_on": "1",
+                "refresh_rate_mode": "1",
+            }
+        }
+        for ns, kv in samsung_revert.items():
+            for k, v in kv.items():
+                adb_shell(f"settings put {ns} {k} {v}")
+        
+        adb_shell("settings delete secure min_refresh_rate")
+        adb_shell("pm enable --user 0 com.samsung.android.game.gos")
+        adb_shell("pm enable --user 0 com.samsung.android.game.gamelab")
         
     print("Revert complete.")
 
