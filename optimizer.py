@@ -224,14 +224,18 @@ def revert_all():
     adb_shell("settings delete global wifi_scan_throttle_enabled")
     adb_shell("settings put global mobile_data_always_on 1")
     adb_shell("settings delete global wifi_power_save")
-    adb_shell("settings delete global cached_apps_freezer")
-    adb_shell("settings delete global adaptive_battery_management_enabled")
+    adb_shell("settings put global cached_apps_freezer enabled")
+    adb_shell("settings put global adaptive_battery_management_enabled 1")
     adb_shell("settings delete global battery_saver_constants")
     adb_shell("settings put global low_power 0")
     adb_shell("settings put global low_power_sticky 0")
     adb_shell("settings delete global low_power_trigger_level")
     adb_shell("cmd battery-saver set-front-restricted 0")
     adb_shell("cmd battery-saver set-back-restricted 0")
+    adb_shell("settings put global app_standby_enabled 1")
+    adb_shell("settings put global master_sync_status 1")
+    adb_shell("settings put global default_restrict_background_data 0")
+    adb_shell("settings put global zram_enabled 1")
     
     # 4. Revert Device Config optimizations
     adb_shell("device_config delete activity_manager bg_current_drain_auto_restrict_abusive_apps_enabled")
@@ -250,32 +254,62 @@ def revert_all():
         adb_shell("settings put global pwr_save_mode_on 0")
         adb_shell("settings put system psm_switch 0")
         adb_shell("settings put system psm_skipped_time 0")
+        adb_shell("settings put system minimal_battery_use 0")
+        adb_shell("settings put global sem_power_mode_limited_apps_and_home_screen 0")
+        adb_shell("settings put system persist.sys_emc_mode performance")
+        adb_shell("settings put system speed_mode 1")
+        adb_shell("settings put system high_priority 1")
+        adb_shell("settings put system low_priority 0")
+        
+        adb_shell("cmd power set-fixed-performance-mode-enabled false")
+        adb_shell("cmd power set-mode 0")
         
         samsung_revert = {
             "system": {
                 "master_motion": "1", 
                 "motion_engine": "1", 
+                "air_motion_engine": "1",
+                "air_motion_wake_up": "1",
                 "mcf_continuity": "1",
+                "mcf_continuity_permission_denied": "0",
+                "mcf_permission_denied": "0",
+                "intelligent_sleep_mode": "1",
                 "adaptive_fast_charging": "1",
-                "p_battery_charging_efficiency": "0"
+                "p_battery_charging_efficiency": "0",
+                "nearby_scanning_enabled": "1",
+                "nearby_scanning_permission_allowed": "1",
+                "remote_control": "1",
+                "send_security_reports": "1"
             },
             "global": {
                 "sem_enhanced_cpu_responsiveness": "1", 
-                "ram_expand_size": "4",
-                "restricted_device_performance": "0,0"
+                "ram_expand_size": "4096",
+                "ram_expand_size_list": "2,4,6,8",
+                "restricted_device_performance": "0,0",
+                "enhanced_processing": "1",
+                "app_restriction_enabled": "0",
+                "automatic_power_save_mode": "1",
+                "dynamic_power_savings_enabled": "1",
+                "zram_enabled": "1"
             },
             "secure": {
                 "vibration_on": "1",
                 "refresh_rate_mode": "1",
+                "adaptive_sleep": "1",
+                "game_auto_temperature_control": "1"
             }
         }
         for ns, kv in samsung_revert.items():
             for k, v in kv.items():
                 adb_shell(f"settings put {ns} {k} {v}")
         
+        adb_shell("settings put system peak_refresh_rate 120.0")
+        adb_shell("settings put secure user_refresh_rate 120.0")
         adb_shell("settings delete secure min_refresh_rate")
         adb_shell("pm enable --user 0 com.samsung.android.game.gos")
         adb_shell("pm enable --user 0 com.samsung.android.game.gamelab")
+        
+    print("Revert complete.")
         
     print("Revert complete.")
 
