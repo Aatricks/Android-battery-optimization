@@ -210,6 +210,8 @@ def revert_all():
     for key in doze_keys:
         adb_shell(f"device_config delete device_idle {key}")
     adb_shell("settings delete global device_idle_constants")
+    adb_shell("dumpsys deviceidle unforce")
+    adb_shell("dumpsys deviceidle enable")
     
     # 2. Revert Animation scales
     adb_shell("settings put global window_animation_scale 1.0")
@@ -226,6 +228,10 @@ def revert_all():
     adb_shell("settings delete global adaptive_battery_management_enabled")
     adb_shell("settings delete global battery_saver_constants")
     adb_shell("settings put global low_power 0")
+    adb_shell("settings put global low_power_sticky 0")
+    adb_shell("settings delete global low_power_trigger_level")
+    adb_shell("cmd battery-saver set-front-restricted 0")
+    adb_shell("cmd battery-saver set-back-restricted 0")
     
     # 4. Revert Device Config optimizations
     adb_shell("device_config delete activity_manager bg_current_drain_auto_restrict_abusive_apps_enabled")
@@ -238,6 +244,13 @@ def revert_all():
     brand = adb_shell("getprop ro.product.brand")
     if brand.lower() == "samsung":
         print("Reverting Samsung-specific optimizations...")
+        # Force turn off any Samsung power saving modes
+        adb_shell("settings put system pwr_save_mode 0")
+        adb_shell("settings put global pwr_save_mode 0")
+        adb_shell("settings put global pwr_save_mode_on 0")
+        adb_shell("settings put system psm_switch 0")
+        adb_shell("settings put system psm_skipped_time 0")
+        
         samsung_revert = {
             "system": {
                 "master_motion": "1", 
