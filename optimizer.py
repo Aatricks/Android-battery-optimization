@@ -200,6 +200,66 @@ def optimize_samsung(extreme=False):
     adb_shell("pm disable-user --user 0 com.samsung.android.game.gamelab")
     print("Samsung optimizations applied.")
 
+def restrict_background_apps(level="ignore"):
+    print(f"Setting background restriction to '{level}' for 3rd party apps...")
+    packages = get_packages(third_party=True)
+    whitelist = load_whitelist()
+    for pkg in packages:
+        if pkg in whitelist:
+            print(f"  Skipping whitelisted app: {pkg}")
+            adb_shell(f"cmd appops set {pkg} RUN_ANY_IN_BACKGROUND allow")
+            adb_shell(f"am set-standby-bucket {pkg} active")
+            continue
+            
+        adb_shell(f"cmd appops set {pkg} RUN_ANY_IN_BACKGROUND {level}")
+        if level == "ignore":
+            adb_shell(f"am set-standby-bucket {pkg} rare")
+        else:
+            adb_shell(f"am set-standby-bucket {pkg} active")
+    print("App restrictions updated.")
+
+def manage_whitelist():
+    whitelist = load_whitelist()
+    while True:
+        print("\n--- Whitelist Management ---")
+        print("Current Whitelist:")
+        for i, pkg in enumerate(whitelist):
+            print(f"  {i+1}. {pkg}")
+        
+        print("\n1. Add App to Whitelist")
+        print("2. Remove App from Whitelist")
+        print("3. Back")
+        
+        choice = input("Select an option: ")
+        if choice == "1":
+            pkg = input("Enter package name to add (or part of it to search): ")
+            if "." not in pkg:
+                all_pkgs = get_packages(third_party=True)
+                matches = [p for p in all_pkgs if pkg in p]
+                if not matches:
+                    print("No matches found.")
+                    continue
+                for i, m in enumerate(matches):
+                    print(f"  {i+1}. {m}")
+                idx = input("Select number to add (or 0 to cancel): ")
+                if idx.isdigit() and 0 < int(idx) <= len(matches):
+                    pkg = matches[int(idx)-1]
+                else:
+                    continue
+            
+            if pkg not in whitelist:
+                whitelist.append(pkg)
+                save_whitelist(whitelist)
+                print(f"Added {pkg} to whitelist.")
+        elif choice == "2":
+            idx = input("Enter number to remove: ")
+            if idx.isdigit() and 0 < int(idx) <= len(whitelist):
+                removed = whitelist.pop(int(idx)-1)
+                save_whitelist(whitelist)
+                print(f"Removed {removed} from whitelist.")
+        elif choice == "3":
+            break
+
 def revert_all():
     print("Reverting all changes...")
     
@@ -325,8 +385,6 @@ def revert_all():
         adb_shell("settings delete secure min_refresh_rate")
         adb_shell("pm enable --user 0 com.samsung.android.game.gos")
         adb_shell("pm enable --user 0 com.samsung.android.game.gamelab")
-        
-    print("Revert complete.")
         
     print("Revert complete.")
 
