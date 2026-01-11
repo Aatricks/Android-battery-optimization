@@ -111,13 +111,16 @@ def optimize_system_settings(extreme=False):
         adb_shell("settings put global default_restrict_background_data 1")
         adb_shell("settings put global auto_wifi 0")
         adb_shell("settings put global tether_offload_disabled 1")
+        adb_shell("settings put global sys_uidcpupower 0")
+        adb_shell("settings put global zram 0")
+        adb_shell("settings put global zram_enabled 0")
     
     # Power Management
     adb_shell("settings put global cached_apps_freezer enabled")
     adb_shell("settings put global adaptive_battery_management_enabled 1")
     
     if extreme:
-        adb_shell("settings put global app_standby_enabled 1")
+        adb_shell("settings put global app_standby_enabled 0")
         adb_shell("settings put global dynamic_power_savings_enabled 1")
         adb_shell("settings put global automatic_power_save_mode 1")
         adb_shell("settings put global low_power 1")
@@ -155,21 +158,26 @@ def optimize_samsung(extreme=False):
             "adaptive_fast_charging": "1",
             "p_battery_charging_efficiency": "1",
             "nearby_scanning_enabled": "0",
-            "nearby_scanning_permission_allowed": "0"
+            "nearby_scanning_permission_allowed": "0",
+            "tube_amp_effect": "1",
+            "k2hd_effect": "1"
         },
         "global": {
             "sem_enhanced_cpu_responsiveness": "0", 
             "ram_expand_size": "0",
             "cached_apps_freezer": "enabled",
             "restricted_device_performance": "1,1",
-            "enhanced_processing": "0"
+            "enhanced_processing": "0",
+            "burn_in_protection": "1"
         },
         "secure": {
             "vibration_on": "0",
             "refresh_rate_mode": "1",
             "min_refresh_rate": "10.0",
             "adaptive_sleep": "0",
-            "game_auto_temperature_control": "0"
+            "game_auto_temperature_control": "0",
+            "game_home_enable": "0",
+            "game_bixby_block": "1"
         }
     }
     
@@ -196,6 +204,7 @@ def optimize_samsung(extreme=False):
             adb_shell(f"settings put {ns} {k} {v}")
     
     adb_shell("pm clear --user 0 com.samsung.android.game.gos")
+    adb_shell("pm clear --user 0 com.samsung.android.game.gamelab")
     adb_shell("pm disable-user --user 0 com.samsung.android.game.gos")
     adb_shell("pm disable-user --user 0 com.samsung.android.game.gamelab")
     print("Samsung optimizations applied.")
@@ -299,6 +308,8 @@ def revert_all():
     adb_shell("settings put global master_sync_status 1")
     adb_shell("settings put global default_restrict_background_data 0")
     adb_shell("settings put global zram_enabled 1")
+    adb_shell("settings put global zram 1")
+    adb_shell("settings put global sys_uidcpupower 1")
     adb_shell("settings put global auto_wifi 1")
     adb_shell("settings delete global tether_offload_disabled")
     adb_shell("settings put global dynamic_power_savings_enabled 0")
@@ -407,7 +418,7 @@ def main():
         print("9. Run Background Optimization (Dexopt)")
         print("10. Revert All Changes")
         print("11. Exit")
-        choice = input("\nSelect an option: ")
+        choice = input("\nSelect an option: ").strip()
         if choice == "1": check_battery()
         elif choice == "2":
             optimize_doze(aggressive=False)
