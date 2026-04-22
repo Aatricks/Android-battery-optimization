@@ -1,41 +1,24 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import ANY, MagicMock, patch
 
 from optimizer import (
     AdbClient,
     BatteryOptimizerApp,
+    BatteryOptimizerCLI,
     CommandError,
     CommandResult,
     StateRecorder,
     StateStore,
     parse_adb_devices,
     resolve_package_choice,
+    SubprocessRunner,
 )
 
 
-class FakeRunner:
-    def __init__(self, responses=None, which_map=None):
-        self.responses = responses or {}
-        self.which_map = {"adb": "/usr/bin/adb"} if which_map is None else which_map
-        self.calls = []
-
-    def run(self, args):
-        key = tuple(args)
-        self.calls.append(list(args))
-        response = self.responses.get(key)
-        if callable(response):
-            return response(args)
-        if response is None:
-            return CommandResult(0, "", "")
-        return response
-
-    def which(self, name):
-        return self.which_map.get(name)
-
-
 class OptimizerTests(unittest.TestCase):
-    def make_app(self, runner, state_dir, responses=None, user_inputs=None):
+    def make_app_and_cli(self, state_dir, user_inputs=None):
         outputs = []
         input_values = list(user_inputs or [])
 
@@ -44,14 +27,15 @@ class OptimizerTests(unittest.TestCase):
                 raise AssertionError(f"Unexpected prompt: {prompt}")
             return input_values.pop(0)
 
+        runner = SubprocessRunner()
         client = AdbClient(runner=runner, output=outputs.append)
-        app = BatteryOptimizerApp(
-            client=client,
-            state_dir=state_dir,
+        app = BatteryOptimizerApp(client=client, state_dir=state_dir)
+        cli = BatteryOptimizerCLI(
+            app=app,
             output=outputs.append,
             input_fn=fake_input,
         )
-        return app, outputs
+        return app, cli, outputs
 
     def test_parse_adb_devices(self):
         devices = parse_adb_devices(
@@ -72,294 +56,234 @@ class OptimizerTests(unittest.TestCase):
             ["com.example.music"],
         )
 
-    def test_missing_adb_is_reported(self):
+    @patch("optimizer.shutil.which")
+    @patch("optimizer.subprocess.run")
+    def test_missing_adb_is_reported(self, mock_run, mock_which):
+        mock_which.return_value = None
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(which_map={})
-            app, outputs = self.make_app(runner, Path(tmp))
-            self.assertFalse(app.check_environment())
+            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            self.assertFalse(cli.check_environment())
             self.assertIn("ADB was not found in PATH.", outputs[0])
 
-    def test_no_devices_is_reported(self):
+    @patch("optimizer.shutil.which")
+    @patch("optimizer.subprocess.run")
+    def test_no_devices_is_reported(self, mock_run, mock_which):
+        mock_which.return_value = "/usr/bin/adb"
+        mock_run.return_value = MagicMock(returncode=0, stdout="List of devices attached\n\n", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    ("adb", "devices"): CommandResult(0, "List of devices attached\n\n", "")
-                }
-            )
-            app, outputs = self.make_app(runner, Path(tmp))
-            self.assertFalse(app.check_environment())
+            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            self.assertFalse(cli.check_environment())
             self.assertIn("No ADB devices detected.", outputs[0])
 
-    def test_multiple_devices_requires_selection(self):
+    @patch("optimizer.shutil.which")
+    @patch("optimizer.subprocess.run")
+    def test_multiple_devices_requires_selection(self, mock_run, mock_which):
+        mock_which.return_value = "/usr/bin/adb"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="List of devices attached\nserial-1\tdevice\nserial-2\tdevice\n",
+            stderr=""
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "devices",
-                    ): CommandResult(
-                        0,
-                        "List of devices attached\nserial-1\tdevice\nserial-2\tdevice\n",
-                        "",
-                    )
-                }
-            )
-            app, _ = self.make_app(runner, Path(tmp), user_inputs=["2"])
-            self.assertTrue(app.check_environment())
-            self.assertEqual(app.client.serial, "serial-2")
+            _, cli, _ = self.make_app_and_cli(Path(tmp), user_inputs=["2"])
+            self.assertTrue(cli.check_environment())
+            self.assertEqual(cli.client.serial, "serial-2")
 
-    def test_unauthorized_device_is_blocked(self):
+    @patch("optimizer.shutil.which")
+    @patch("optimizer.subprocess.run")
+    def test_unauthorized_device_is_blocked(self, mock_run, mock_which):
+        mock_which.return_value = "/usr/bin/adb"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="List of devices attached\nserial-1\tunauthorized\n",
+            stderr=""
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "devices",
-                    ): CommandResult(
-                        0,
-                        "List of devices attached\nserial-1\tunauthorized\n",
-                        "",
-                    )
-                }
-            )
-            app, outputs = self.make_app(runner, Path(tmp))
-            self.assertFalse(app.check_environment())
+            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            self.assertFalse(cli.check_environment())
             self.assertIn("No authorized online device is available.", outputs[-1])
 
-    def test_experimental_confirmation_blocks_mutation(self):
+    @patch("optimizer.shutil.which")
+    @patch("optimizer.subprocess.run")
+    def test_experimental_confirmation_blocks_mutation(self, mock_run, mock_which):
+        mock_which.return_value = "/usr/bin/adb"
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "devices" in cmd:
+                return MagicMock(returncode=0, stdout="List of devices attached\nserial-1\tdevice\n", stderr="")
+            if "getprop ro.product.brand" in cmd:
+                return MagicMock(returncode=0, stdout="google\n", stderr="")
+            if "getprop ro.product.model" in cmd:
+                return MagicMock(returncode=0, stdout="Pixel\n", stderr="")
+            if "getprop ro.build.version.release" in cmd:
+                return MagicMock(returncode=0, stdout="14\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    ("adb", "devices"): CommandResult(
-                        0,
-                        "List of devices attached\nserial-1\tdevice\n",
-                        "",
-                    ),
-                    ("adb", "-s", "serial-1", "shell", "getprop", "ro.product.brand"): CommandResult(
-                        0, "google\n", ""
-                    ),
-                    ("adb", "-s", "serial-1", "shell", "getprop", "ro.product.model"): CommandResult(
-                        0, "Pixel\n", ""
-                    ),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "getprop",
-                        "ro.build.version.release",
-                    ): CommandResult(0, "14\n", ""),
-                }
-            )
-            app, outputs = self.make_app(runner, Path(tmp), user_inputs=["n"])
+            app, cli, outputs = self.make_app_and_cli(Path(tmp), user_inputs=["3", "n", "9"])
+            cli.client.serial = "serial-1"
+            
+            with patch.object(app, 'apply_experimental_optimizations') as mock_apply:
+                cli.run()
+                mock_apply.assert_not_called()
+                
+            self.assertIn("Skipped experimental optimizations.", outputs)
+
+    @patch("optimizer.subprocess.run")
+    def test_snapshot_restore_for_unset_setting_uses_delete(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
-            app.apply_experimental_optimizations()
-            self.assertIn("Skipped experimental optimizations.", outputs[-1])
-            self.assertEqual(
-                [call for call in runner.calls if "device_config" in call or "settings" in call],
-                [],
-            )
 
-    def test_snapshot_restore_for_unset_setting_uses_delete(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "settings",
-                        "get",
-                        "global",
-                        "wifi_scan_throttle_enabled",
-                    ): CommandResult(0, "null\n", ""),
-                }
-            )
-            client = AdbClient(runner=runner, serial="serial-1")
-            store = StateStore(Path(tmp))
-            recorder = StateRecorder(client, store)
-            recorder.put_setting("global", "wifi_scan_throttle_enabled", "1")
-            messages = recorder.restore()
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "wifi_scan_throttle_enabled", "1")
+
+            messages = app.revert_saved_state()
             self.assertTrue(any("Restored setting global/wifi_scan_throttle_enabled" in m for m in messages))
-            self.assertIn(
-                [
-                    "adb",
-                    "-s",
-                    "serial-1",
-                    "shell",
-                    "settings",
-                    "delete",
-                    "global",
-                    "wifi_scan_throttle_enabled",
-                ],
-                runner.calls,
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "delete", "global", "wifi_scan_throttle_enabled"],
+                capture_output=True,
+                text=True,
+                input=None
             )
 
-    def test_package_state_restore_covers_appops_bucket_and_enabled_state(self):
+    @patch("optimizer.subprocess.run")
+    def test_package_state_restore_covers_appops_bucket_and_enabled_state(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "dumpsys appops" in cmd:
+                return MagicMock(returncode=0, stdout="  Package com.example.app:\n    RUN_ANY_IN_BACKGROUND: allow\n", stderr="")
+            if "dumpsys usagestats" in cmd:
+                return MagicMock(returncode=0, stdout="package=com.example.app u=0 bucket=active reason=...\n", stderr="")
+            if "list packages -d" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "list packages -e" in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.app\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "cmd",
-                        "appops",
-                        "get",
-                        "com.example.app",
-                        "RUN_ANY_IN_BACKGROUND",
-                    ): CommandResult(0, "RUN_ANY_IN_BACKGROUND: allow\n", ""),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "am",
-                        "get-standby-bucket",
-                        "com.example.app",
-                    ): CommandResult(0, "com.example.app: active\n", ""),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "pm",
-                        "list",
-                        "packages",
-                        "-d",
-                        "com.example.app",
-                    ): CommandResult(0, "", ""),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "pm",
-                        "list",
-                        "packages",
-                        "-e",
-                        "com.example.app",
-                    ): CommandResult(0, "package:com.example.app\n", ""),
-                }
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            with app.recorder.transaction():
+                app.recorder.prefetch_package_states()
+                app.recorder.set_appop("com.example.app", "RUN_ANY_IN_BACKGROUND", "ignore")
+                app.recorder.set_standby_bucket("com.example.app", "rare")
+                app.recorder.set_package_enabled("com.example.app", enabled=False)
+
+            app.revert_saved_state()
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "cmd", "appops", "set", "com.example.app", "RUN_ANY_IN_BACKGROUND", "allow"],
+                capture_output=True, text=True, input=None
             )
-            client = AdbClient(runner=runner, serial="serial-1")
-            store = StateStore(Path(tmp))
-            recorder = StateRecorder(client, store)
-            recorder.set_appop("com.example.app", "RUN_ANY_IN_BACKGROUND", "ignore")
-            recorder.set_standby_bucket("com.example.app", "rare")
-            recorder.set_package_enabled("com.example.app", enabled=False)
-            recorder.restore()
-            self.assertIn(
-                [
-                    "adb",
-                    "-s",
-                    "serial-1",
-                    "shell",
-                    "cmd",
-                    "appops",
-                    "set",
-                    "com.example.app",
-                    "RUN_ANY_IN_BACKGROUND",
-                    "allow",
-                ],
-                runner.calls,
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "am", "set-standby-bucket", "com.example.app", "active"],
+                capture_output=True, text=True, input=None
             )
-            self.assertIn(
-                [
-                    "adb",
-                    "-s",
-                    "serial-1",
-                    "shell",
-                    "am",
-                    "set-standby-bucket",
-                    "com.example.app",
-                    "active",
-                ],
-                runner.calls,
-            )
-            self.assertIn(
-                [
-                    "adb",
-                    "-s",
-                    "serial-1",
-                    "shell",
-                    "pm",
-                    "enable",
-                    "--user",
-                    "0",
-                    "com.example.app",
-                ],
-                runner.calls,
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "pm", "enable", "--user", "0", "com.example.app"],
+                capture_output=True, text=True, input=None
             )
 
-    def test_restore_keeps_snapshot_when_a_step_fails(self):
+    @patch("optimizer.subprocess.run")
+    def test_restore_reports_failures(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="window_animation_scale=1.0\n", stderr="")
+            if "settings put global window_animation_scale 1.0" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="permission denied")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
         with tempfile.TemporaryDirectory() as tmp:
-            state_dir = Path(tmp)
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "settings",
-                        "get",
-                        "global",
-                        "window_animation_scale",
-                    ): CommandResult(0, "1.0\n", ""),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "settings",
-                        "put",
-                        "global",
-                        "window_animation_scale",
-                        "0.5",
-                    ): CommandResult(0, "", ""),
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "settings",
-                        "put",
-                        "global",
-                        "window_animation_scale",
-                        "1.0",
-                    ): CommandResult(1, "", "permission denied"),
-                }
-            )
-            client = AdbClient(runner=runner, serial="serial-1")
-            store = StateStore(state_dir)
-            recorder = StateRecorder(client, store)
-            recorder.put_setting("global", "window_animation_scale", "0.5")
-            messages = recorder.restore()
+            app, _, outputs = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "window_animation_scale", "0.5")
+
+            messages = app.revert_saved_state()
             self.assertTrue(any("Failed to restore setting global/window_animation_scale" in m for m in messages))
-            self.assertTrue((state_dir / "state.json").exists())
+            self.assertTrue((Path(tmp) / "state.json").exists())
+            self.assertTrue(any("Partial state corruption" in out for out in outputs))
 
-    def test_validate_package_blocks_unknown_package(self):
+    @patch("optimizer.subprocess.run")
+    def test_validate_package_blocks_unknown_package(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="package:com.example.safe\n", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
-            runner = FakeRunner(
-                responses={
-                    (
-                        "adb",
-                        "-s",
-                        "serial-1",
-                        "shell",
-                        "pm",
-                        "list",
-                        "packages",
-                    ): CommandResult(0, "package:com.example.safe\n", "")
-                }
-            )
-            app, _ = self.make_app(runner, Path(tmp))
+            app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
             with self.assertRaises(ValueError):
                 app.validate_package("com.bad.actor;rm -rf /")
+
+    @patch("optimizer.subprocess.run")
+    def test_partial_rollback_on_batch_failure(self, mock_run):
+        def side_effect(args, **kwargs):
+            input_data = kwargs.get('input')
+            if input_data and "SUCCESS_0" in input_data:
+                # First command succeeds, second fails
+                return MagicMock(returncode=1, stdout="SUCCESS_0\n", stderr="simulated failure")
+            if "settings list global" in " ".join(args):
+                return MagicMock(returncode=0, stdout="some_setting=old_value\nother_setting=old_value\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            try:
+                with app.recorder.transaction():
+                    app.recorder.put_setting("global", "some_setting", "new_value")
+                    app.recorder.put_setting("global", "other_setting", "new_value")
+            except CommandError:
+                pass
+
+            # Only some_setting (index 0) should be reverted because SUCCESS_0 was in stdout
+            # other_setting (index 1) should NOT be reverted
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "some_setting", "old_value"],
+                capture_output=True, text=True, input=None
+            )
+            
+            # Verify other_setting was NOT reverted
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                cmd_str = " ".join(args)
+                if "other_setting" in cmd_str and "put" in cmd_str:
+                    self.assertFalse("old_value" in cmd_str)
+
+    @patch("optimizer.subprocess.run")
+    def test_no_rollback_if_not_dispatched(self, mock_run):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            try:
+                with app.recorder.transaction():
+                    app.recorder.put_setting("global", "some_setting", "value")
+                    raise RuntimeError("Pre-dispatch error")
+            except RuntimeError as e:
+                if str(e) != "Pre-dispatch error":
+                    raise
+
+            # Revert should NOT be called because batch_dispatched was False
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                cmd_str = " ".join(args)
+                self.assertFalse("settings put" in cmd_str and "old_value" in cmd_str)
 
 
 if __name__ == "__main__":
