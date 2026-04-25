@@ -866,7 +866,7 @@ class StateRecorder:
             return messages
 
         if had_failures:
-            self.store.save()
+            self.store.save_or_clear()
             self.client.output("Warning: Partial state corruption due to restore failures.")
         else:
             self.store.clear()

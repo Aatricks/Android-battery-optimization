@@ -185,7 +185,7 @@ class StateStore:
             self._in_transaction = False
             if success:
                 if self._pending_save:
-                    self.save()
+                    self.save_or_clear()
             else:
                 self.data = backup
                 self._pending_save = False
@@ -232,6 +232,8 @@ class StateStore:
         return any(self.data.get(key) for key in ("settings", "device_config", "packages"))
 
     def save_or_clear(self) -> None:
+        if self.client.dry_run:
+            return
         if self.has_entries():
             self.save()
         else:
