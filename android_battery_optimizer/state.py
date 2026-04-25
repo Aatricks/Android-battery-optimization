@@ -39,21 +39,129 @@ class StateStore:
         self.path = device_dir / SNAPSHOT_FILE
         self.data = self._load()
 
+    def _quarantine_state_file(self) -> None:
+        if not self.path or not self.path.exists():
+            return
+
+        import time
+
+        timestamp = int(time.time())
+        corrupt_path = self.path.with_name(f"{SNAPSHOT_FILE}.corrupt.{timestamp}")
+        try:
+            os.replace(self.path, corrupt_path)
+        except OSError:
+            pass
+
+    def _require_dict_section(self, state: dict[str, object], key: str) -> dict[str, object]:
+        value = state.get(key)
+        if not isinstance(value, dict):
+            raise ValueError(f"State field '{key}' must be an object.")
+        return value
+
+    def _validate_scalar_kv_section(
+        self,
+        section_name: str,
+        section: dict[str, object],
+    ) -> None:
+        for snapshot_key, item in section.items():
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"State section '{section_name}' entry '{snapshot_key}' must be an object."
+                )
+            for required_key in ("namespace", "key", "value"):
+                if required_key not in item:
+                    raise ValueError(
+                        f"State section '{section_name}' entry '{snapshot_key}' is missing '{required_key}'."
+                    )
+
+            namespace = item["namespace"]
+            key = item["key"]
+            value = item["value"]
+            if not isinstance(namespace, str) or not isinstance(key, str):
+                raise ValueError(
+                    f"State section '{section_name}' entry '{snapshot_key}' must use string namespace/key."
+                )
+            if value is not None and not isinstance(value, str):
+                raise ValueError(
+                    f"State section '{section_name}' entry '{snapshot_key}' has non-string value."
+                )
+
+    def _validate_packages_section(self, packages: dict[str, object]) -> None:
+        for package, item in packages.items():
+            if not isinstance(package, str):
+                raise ValueError("State packages keys must be strings.")
+            if not isinstance(item, dict):
+                raise ValueError(f"State packages entry '{package}' must be an object.")
+
+            for required_key in ("appops", "standby_bucket", "enabled"):
+                if required_key not in item:
+                    raise ValueError(
+                        f"State packages entry '{package}' is missing '{required_key}'."
+                    )
+
+            appops = item["appops"]
+            standby_bucket = item["standby_bucket"]
+            enabled = item["enabled"]
+
+            if not isinstance(appops, dict):
+                raise ValueError(f"State packages entry '{package}' appops must be an object.")
+            for op, mode in appops.items():
+                if not isinstance(op, str):
+                    raise ValueError(f"State packages entry '{package}' has non-string appop key.")
+                if not isinstance(mode, str):
+                    raise ValueError(
+                        f"State packages entry '{package}' appop '{op}' must be a string."
+                    )
+
+            if standby_bucket is not None and not isinstance(standby_bucket, str):
+                raise ValueError(
+                    f"State packages entry '{package}' standby_bucket must be a string or null."
+                )
+            if enabled is not None and not isinstance(enabled, bool):
+                raise ValueError(
+                    f"State packages entry '{package}' enabled must be boolean or null."
+                )
+
+    def _normalize_state(self, raw: object) -> dict[str, object]:
+        if not isinstance(raw, dict):
+            raise ValueError("State root must be an object.")
+
+        version = raw.get("version", 2)
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ValueError("State field 'version' must be an integer.")
+
+        device = self._require_dict_section(raw, "device")
+        settings = self._require_dict_section(raw, "settings")
+        device_config = self._require_dict_section(raw, "device_config")
+        packages = self._require_dict_section(raw, "packages")
+
+        self._validate_scalar_kv_section("settings", settings)
+        self._validate_scalar_kv_section("device_config", device_config)
+        self._validate_packages_section(packages)
+
+        return {
+            "version": version,
+            "device": dict(device),
+            "settings": dict(settings),
+            "device_config": dict(device_config),
+            "packages": dict(packages),
+        }
+
     def _load(self) -> Dict[str, object]:
         if not self.path or not self.path.exists():
             return self._empty_state()
 
         try:
             with self.path.open("r", encoding="utf-8") as handle:
-                return json.load(handle)
+                raw = json.load(handle)
         except (json.JSONDecodeError, ValueError):
-            import time
-            timestamp = int(time.time())
-            corrupt_path = self.path.with_name(f"{SNAPSHOT_FILE}.corrupt.{timestamp}")
-            try:
-                os.replace(self.path, corrupt_path)
-            except OSError:
-                pass
+            self._quarantine_state_file()
+            return self._empty_state()
+
+        try:
+            return self._normalize_state(raw)
+        except ValueError:
+            self._quarantine_state_file()
             return self._empty_state()
 
     @contextmanager
