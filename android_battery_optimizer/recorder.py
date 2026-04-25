@@ -502,8 +502,13 @@ class StateRecorder:
     def verify_setting(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
         if self.client.dry_run:
             return
-        actual = self.client.shell_text(["settings", "get", namespace, key], check=False)
-        actual = self._normalize_value(actual)
+        result = self.client.shell(["settings", "get", namespace, key], check=False)
+        if result.returncode != 0:
+            raise VerificationError(
+                f"Verification failed for setting {namespace}/{key}: "
+                f"read command failed with exit code {result.returncode}"
+            )
+        actual = self._normalize_value(result.stdout)
         expected = self._normalize_value(expected_value)
         if actual != expected:
             raise VerificationError(
@@ -514,8 +519,13 @@ class StateRecorder:
     def verify_device_config(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
         if self.client.dry_run:
             return
-        actual = self.client.shell_text(["device_config", "get", namespace, key], check=False)
-        actual = self._normalize_value(actual)
+        result = self.client.shell(["device_config", "get", namespace, key], check=False)
+        if result.returncode != 0:
+            raise VerificationError(
+                f"Verification failed for device_config {namespace}/{key}: "
+                f"read command failed with exit code {result.returncode}"
+            )
+        actual = self._normalize_value(result.stdout)
         expected = self._normalize_value(expected_value)
         if actual != expected:
             raise VerificationError(
@@ -526,9 +536,24 @@ class StateRecorder:
     def verify_appop(self, package: str, op: str, expected_value: str) -> None:
         if self.client.dry_run:
             return
-        output = self.client.shell_text(["cmd", "appops", "get", package, op], check=False)
+        result = self.client.shell(["cmd", "appops", "get", package, op], check=False)
+        if result.returncode != 0:
+            raise VerificationError(
+                f"Verification failed for appop {op} for package {package}: "
+                f"read command failed with exit code {result.returncode}"
+            )
+        output = result.stdout.strip()
         match = re.search(r"mode[:=]\s*(\w+)", output)
-        actual = match.group(1) if match else "default"
+        if match:
+            actual = match.group(1)
+        elif "No overrides" in output:
+            actual = "default"
+        else:
+            raise VerificationError(
+                f"Verification failed for appop {op} for package {package}: "
+                f"could not parse command output: {output}"
+            )
+
         if actual != expected_value:
             raise VerificationError(
                 f"Verification failed for appop {op} for package {package}: "
@@ -538,7 +563,13 @@ class StateRecorder:
     def verify_standby_bucket(self, package: str, expected_bucket: str) -> None:
         if self.client.dry_run:
             return
-        actual = self.client.shell_text(["am", "get-standby-bucket", package], check=False).strip()
+        result = self.client.shell(["am", "get-standby-bucket", package], check=False)
+        if result.returncode != 0:
+            raise VerificationError(
+                f"Verification failed for standby bucket for package {package}: "
+                f"read command failed with exit code {result.returncode}"
+            )
+        actual = result.stdout.strip()
         expected_code = STANDBY_BUCKET_MAP.get(expected_bucket.lower(), expected_bucket)
         if actual != expected_code:
             raise VerificationError(
