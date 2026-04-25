@@ -594,8 +594,8 @@ class OptimizerTests(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="30\n", stderr="")
             if "cmd appops help" in cmd:
                 return MagicMock(returncode=0, stdout="help", stderr="")
-            if "am set-standby-bucket" in cmd:
-                return MagicMock(returncode=0, stdout="help", stderr="")
+            if "am set-standby-bucket" in cmd or "am get-standby-bucket" in cmd:
+                return MagicMock(returncode=0, stdout="10\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
         mock_run.side_effect = side_effect
 

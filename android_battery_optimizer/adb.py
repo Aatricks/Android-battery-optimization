@@ -128,8 +128,17 @@ class AdbClient:
             info = self.get_device_info_struct()
             if info.sdk_int < 28:
                 return False
-            result = self.shell(["am", "set-standby-bucket"], check=False)
-            return result.returncode != 127
+                
+            result = self.shell(["am", "get-standby-bucket", "android"], check=False)
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                return True
+                
+            help_result = self.shell(["am", "help"], check=False)
+            help_output = help_result.stdout + help_result.stderr
+            if "set-standby-bucket" in help_output and "get-standby-bucket" in help_output:
+                return True
+                
+            return False
         except Exception:
             return False
 

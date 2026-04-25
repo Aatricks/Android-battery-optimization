@@ -274,6 +274,7 @@ class TestSafetyRegressions(unittest.TestCase):
         # Mock support
         self.runner.responses["adb shell cmd appops help"] = CommandResult(0, "", "")
         self.runner.responses["adb shell am set-standby-bucket"] = CommandResult(0, "", "")
+        self.runner.responses["adb shell am get-standby-bucket android"] = CommandResult(0, "10\n", "")
         
         # Mock packages
         self.runner.responses["adb shell pm list packages -3"] = CommandResult(0, "package:com.app.mutated\npackage:com.app.whitelisted", "")
