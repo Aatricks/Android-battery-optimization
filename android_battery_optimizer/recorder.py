@@ -52,6 +52,7 @@ class StateRecorder:
         self._package_enabled_cache.clear()
         self._ledger = []
         batch_dispatched = False
+        batch_applied = False
 
         try:
             with self.store.transaction():
@@ -63,22 +64,21 @@ class StateRecorder:
                     script = "\n".join(script_lines)
                     batch_dispatched = True
                     self.client.shell([], mutate=True, input_data=script)
+                    batch_applied = True
                     # If we reach here, batch shell succeeded.
                     if self.verify:
                         for entry in self._ledger:
                             self._verify_entry(entry)
         except Exception as exc:
-            if batch_dispatched:
-                if isinstance(exc, VerificationError):
-                    # Batch succeeded, so all indices are successful
-                    successful_indices = list(range(len(self._ledger)))
-                    self._revert_ledger(successful_indices)
-                else:
-                    stdout = getattr(getattr(exc, "result", None), "stdout", "")
-                    successful_indices = [
-                        int(m.group(1)) for m in re.finditer(r"SUCCESS_(\d+)", stdout)
-                    ]
-                    self._revert_ledger(successful_indices)
+            if batch_applied:
+                successful_indices = list(range(len(self._ledger)))
+                self._revert_ledger(successful_indices)
+            elif batch_dispatched:
+                stdout = getattr(getattr(exc, "result", None), "stdout", "")
+                successful_indices = [
+                    int(m.group(1)) for m in re.finditer(r"SUCCESS_(\d+)", stdout)
+                ]
+                self._revert_ledger(successful_indices)
             raise
         finally:
             self._in_transaction = False
@@ -125,7 +125,7 @@ class StateRecorder:
         if had_failures:
             self.client.output("Warning: Partial state corruption due to rollback failures.")
 
-        self.store.save()
+        self.store.save_or_clear()
 
     def _perform_rollback(self, entry: Dict[str, object]) -> None:
         type_ = entry["type"]

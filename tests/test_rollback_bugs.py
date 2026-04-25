@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import tempfile
 
 from android_battery_optimizer.adb import AdbClient, CommandError, CommandResult
@@ -96,6 +96,170 @@ class ReproRollbackTests(unittest.TestCase):
         self.assertTrue(self.store.has_entries())
         self.assertIn("global/s2", self.store.data["settings"])
         self.assertNotIn("global/s1", self.store.data["settings"])
+
+    def test_state_commit_failure_after_batch_success_rolls_back_all_entries(self):
+        rollback_s2 = (
+            "adb",
+            "-s",
+            "test-device",
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "s2",
+            "old2",
+        )
+        rollback_s1 = (
+            "adb",
+            "-s",
+            "test-device",
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "s1",
+            "old1",
+        )
+
+        def side_effect(args, **kwargs):
+            command = tuple(args)
+            if command == ("adb", "-s", "test-device", "shell", "settings", "list", "global"):
+                return CommandResult(returncode=0, stdout="s1=old1\ns2=old2\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell") and "SUCCESS_0" in kwargs.get("input_data", ""):
+                return CommandResult(returncode=0, stdout="SUCCESS_0\nSUCCESS_1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "get", "global", "s1"):
+                return CommandResult(returncode=0, stdout="v1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "get", "global", "s2"):
+                return CommandResult(returncode=0, stdout="v2\n", stderr="")
+            if command == rollback_s2:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command == rollback_s1:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        self.mock_runner.run.side_effect = side_effect
+
+        original_save = self.store.save
+
+        def save_side_effect():
+            if self.store._in_transaction:
+                return original_save()
+            raise OSError("state commit failed")
+
+        with patch.object(self.store, "save", side_effect=save_side_effect):
+            with self.assertRaises(OSError):
+                with self.recorder.transaction():
+                    self.recorder.put_setting("global", "s1", "v1")
+                    self.recorder.put_setting("global", "s2", "v2")
+
+        called_commands = [tuple(call.args[0]) for call in self.mock_runner.run.call_args_list]
+        self.assertIn(rollback_s2, called_commands)
+        self.assertIn(rollback_s1, called_commands)
+
+    def test_state_commit_failure_after_batch_success_uses_reverse_rollback_order(self):
+        rollback_s2 = (
+            "adb",
+            "-s",
+            "test-device",
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "s2",
+            "old2",
+        )
+        rollback_s1 = (
+            "adb",
+            "-s",
+            "test-device",
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "s1",
+            "old1",
+        )
+
+        def side_effect(args, **kwargs):
+            command = tuple(args)
+            if command == ("adb", "-s", "test-device", "shell", "settings", "list", "global"):
+                return CommandResult(returncode=0, stdout="s1=old1\ns2=old2\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell") and "SUCCESS_0" in kwargs.get("input_data", ""):
+                return CommandResult(returncode=0, stdout="SUCCESS_0\nSUCCESS_1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "get", "global", "s1"):
+                return CommandResult(returncode=0, stdout="v1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "get", "global", "s2"):
+                return CommandResult(returncode=0, stdout="v2\n", stderr="")
+            if command == rollback_s2:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if command == rollback_s1:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        self.mock_runner.run.side_effect = side_effect
+
+        original_save = self.store.save
+
+        def save_side_effect():
+            if self.store._in_transaction:
+                return original_save()
+            raise OSError("state commit failed")
+
+        with patch.object(self.store, "save", side_effect=save_side_effect):
+            with self.assertRaises(OSError):
+                with self.recorder.transaction():
+                    self.recorder.put_setting("global", "s1", "v1")
+                    self.recorder.put_setting("global", "s2", "v2")
+
+        rollback_calls = [
+            tuple(call.args[0])
+            for call in self.mock_runner.run.call_args_list
+            if tuple(call.args[0]) in (rollback_s2, rollback_s1)
+        ]
+        self.assertEqual(rollback_calls, [rollback_s2, rollback_s1])
+
+    def test_batched_verification_failure_with_successful_rollback_removes_empty_state_file(self):
+        def side_effect(args, **kwargs):
+            command = tuple(args)
+            if command == ("adb", "-s", "test-device", "shell", "settings", "list", "global"):
+                return CommandResult(returncode=0, stdout="s1=old1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell") and "SUCCESS_0" in kwargs.get("input_data", ""):
+                return CommandResult(returncode=0, stdout="SUCCESS_0\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "get", "global", "s1"):
+                return CommandResult(returncode=0, stdout="not_v1\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "put", "global", "s1", "old1"):
+                return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        self.mock_runner.run.side_effect = side_effect
+
+        with self.assertRaises(VerificationError):
+            with self.recorder.transaction():
+                self.recorder.put_setting("global", "s1", "v1")
+
+        self.assertFalse(self.store.has_entries())
+        self.assertFalse((self.state_dir / "devices" / "test-device" / "state.json").exists())
+
+    def test_partial_batch_failure_with_successful_rollback_removes_empty_state_file(self):
+        def side_effect(args, **kwargs):
+            command = tuple(args)
+            if command == ("adb", "-s", "test-device", "shell", "settings", "list", "global"):
+                return CommandResult(returncode=0, stdout="s1=old1\ns2=old2\n", stderr="")
+            if command == ("adb", "-s", "test-device", "shell") and "SUCCESS_0" in kwargs.get("input_data", ""):
+                return CommandResult(returncode=1, stdout="SUCCESS_0\n", stderr="batch failed")
+            if command == ("adb", "-s", "test-device", "shell", "settings", "put", "global", "s1", "old1"):
+                return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        self.mock_runner.run.side_effect = side_effect
+
+        with self.assertRaises(CommandError):
+            with self.recorder.transaction():
+                self.recorder.put_setting("global", "s1", "v1")
+                self.recorder.put_setting("global", "s2", "v2")
+
+        self.assertFalse(self.store.has_entries())
+        self.assertFalse((self.state_dir / "devices" / "test-device" / "state.json").exists())
 
     def test_non_transactional_verification_failure_clears_state_after_successful_rollback(self):
         # 1. Call put_setting outside transaction.

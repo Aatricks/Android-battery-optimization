@@ -230,3 +230,9 @@ class StateStore:
 
     def has_entries(self) -> bool:
         return any(self.data.get(key) for key in ("settings", "device_config", "packages"))
+
+    def save_or_clear(self) -> None:
+        if self.has_entries():
+            self.save()
+        else:
+            self.clear()
