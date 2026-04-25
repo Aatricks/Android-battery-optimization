@@ -164,6 +164,9 @@ class TestSafetyRegressions(unittest.TestCase):
         client = self.get_client()
         app = self.get_app(client)
         
+        # Ensure snapshotting succeeds
+        self.runner.responses["adb shell settings list"] = CommandResult(0, "", "")
+        
         # First command succeeds, second fails in batch
         # AdbClient.shell with input_data (the script)
         # The script is: cmd1 && echo SUCCESS_0 || exit $? \n cmd2 && echo SUCCESS_1 || exit $?

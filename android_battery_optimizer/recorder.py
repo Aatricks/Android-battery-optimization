@@ -276,18 +276,25 @@ class StateRecorder:
         except CommandError:
             self._prefetch_standby_bucket_success = False
 
+    def _read_settings_namespace(self, namespace: str) -> Dict[str, str]:
+        result = self.client.shell(["settings", "list", namespace], check=False)
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            raise SnapshotError(f"Failed to list settings in {namespace}: {err}")
+        
+        cache = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                cache[k.strip()] = v.strip()
+        return cache
+
     def _get_setting(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._settings_cache:
             try:
-                output = self.client.shell_text(["settings", "list", namespace], check=False)
-                cache = {}
-                for line in output.splitlines():
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cache[k.strip()] = v.strip()
-                self._settings_cache[namespace] = cache
-            except CommandError:
-                self._settings_cache[namespace] = {}
+                self._settings_cache[namespace] = self._read_settings_namespace(namespace)
+            except SnapshotError as exc:
+                raise SnapshotError(f"Failed to read setting {namespace}/{key}: {exc}") from exc
         return self._settings_cache[namespace].get(key)
 
     def snapshot_setting(self, namespace: str, key: str, new_value: Optional[str] = None) -> None:
@@ -330,18 +337,25 @@ class StateRecorder:
                 self._revert_ledger()
                 raise
 
+    def _read_device_config_namespace(self, namespace: str) -> Dict[str, str]:
+        result = self.client.shell(["device_config", "list", namespace], check=False)
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            raise SnapshotError(f"Failed to list device_config in {namespace}: {err}")
+        
+        cache = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                cache[k.strip()] = v.strip()
+        return cache
+
     def _get_device_config(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._device_config_cache:
             try:
-                output = self.client.shell_text(["device_config", "list", namespace], check=False)
-                cache = {}
-                for line in output.splitlines():
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cache[k.strip()] = v.strip()
-                self._device_config_cache[namespace] = cache
-            except CommandError:
-                self._device_config_cache[namespace] = {}
+                self._device_config_cache[namespace] = self._read_device_config_namespace(namespace)
+            except SnapshotError as exc:
+                raise SnapshotError(f"Failed to read device_config {namespace}/{key}: {exc}") from exc
         return self._device_config_cache[namespace].get(key)
 
     def snapshot_device_config(self, namespace: str, key: str, new_value: Optional[str] = None) -> None:
