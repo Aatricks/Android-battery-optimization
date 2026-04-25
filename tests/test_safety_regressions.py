@@ -4,7 +4,7 @@ import json
 import shutil
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from android_battery_optimizer.adb import (
     AdbClient,
@@ -74,18 +74,9 @@ class TestSafetyRegressions(unittest.TestCase):
     def make_saved_state_app(self, state_data, serial="test-device"):
         client = self.get_client(serial=serial)
         app = self.get_app(client)
-        metadata = {
-            "serial": serial,
-            "brand": "Google",
-            "model": "Pixel 6",
-            "android_release": "13",
-            "sdk": "33",
-            "fingerprint": "fingerprint-1",
-        }
-        app.client.get_device_metadata = MagicMock(return_value=metadata)
         app.store.data = json.loads(json.dumps(state_data))
         app.store.save()
-        return app, metadata
+        return app, state_data.get("device", {})
 
     # 1. Dry-run safety
     def test_dry_run_safety(self):
@@ -400,6 +391,138 @@ class TestSafetyRegressions(unittest.TestCase):
         self.assertFalse(app.store.has_entries())
         state_file = self.test_dir / "devices" / "test-device" / "state.json"
         self.assertFalse(state_file.exists())
+
+    def test_restore_metadata_getprop_failure_falls_back_to_serial_check(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device shell getprop ro.product.brand"] = CommandResult(
+            1,
+            "",
+            "property lookup failed",
+        )
+        self.set_response("adb -s test-device shell settings put global test_key old_val")
+        self.set_response("adb -s test-device shell settings get global test_key", stdout="old_val")
+
+        messages = app.recorder.restore()
+
+        self.assertTrue(any("Restored setting global/test_key" in m for m in messages))
+        self.assertFalse(app.store.has_entries())
+
+    def test_restore_still_refuses_serial_mismatch_with_minimal_metadata(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device-2 shell getprop ro.product.brand"] = CommandResult(
+            1,
+            "",
+            "property lookup failed",
+        )
+        app.client.serial = "test-device-2"
+
+        with self.assertRaisesRegex(ValueError, "Device serial mismatch"):
+            app.recorder.restore()
+
+        self.assertIn("global/test_key", app.store.data["settings"])
+
+    def test_restore_warns_when_fingerprint_cannot_be_verified(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        output_messages = []
+        client = self.get_client(serial="test-device")
+        client.output = output_messages.append
+        app = self.get_app(client)
+        app.store.data = json.loads(json.dumps(state_data))
+        app.store.save()
+
+        self.runner.responses["adb -s test-device shell getprop ro.build.fingerprint"] = CommandResult(
+            1,
+            "",
+            "property lookup failed",
+        )
+        self.set_response("adb -s test-device shell settings put global test_key old_val")
+        self.set_response("adb -s test-device shell settings get global test_key", stdout="old_val")
+
+        messages = app.recorder.restore()
+
+        self.assertTrue(
+            any("could not verify device fingerprint" in message.lower() for message in output_messages)
+        )
+        self.assertTrue(
+            any("could not verify device fingerprint" in message.lower() for message in messages)
+        )
+        self.assertFalse(app.store.has_entries())
+
+    def test_restore_refuses_when_full_fingerprint_mismatches(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device shell getprop ro.build.fingerprint"] = CommandResult(
+            0,
+            "fingerprint-2",
+            "",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Device fingerprint mismatch"):
+            app.recorder.restore()
+
+        self.assertIn("global/test_key", app.store.data["settings"])
 
     def test_failed_restore_still_keeps_state_file(self):
         state_data = {

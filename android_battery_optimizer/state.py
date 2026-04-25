@@ -217,10 +217,7 @@ class StateStore:
         if self.data.get("device"):
             return
 
-        try:
-            self.data["device"] = self.client.get_device_metadata()
-        except CommandError:
-            self.data["device"] = self.client.get_minimal_device_metadata()
+        self.data["device"] = self.client.get_device_metadata_with_fallback()
 
     def clear(self) -> None:
         self.data = self._empty_state()

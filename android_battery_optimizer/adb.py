@@ -120,6 +120,12 @@ class AdbClient:
             "fingerprint": fingerprint,
         }
 
+    def get_device_metadata_with_fallback(self) -> Dict[str, str]:
+        try:
+            return self.get_device_metadata()
+        except CommandError:
+            return self.get_minimal_device_metadata()
+
     def get_minimal_device_metadata(self) -> Dict[str, str]:
         return {
             "serial": self.serial or "unknown-device",

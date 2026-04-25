@@ -662,25 +662,37 @@ class StateRecorder:
         verify_action()
 
     def restore(self) -> List[str]:
+        if self.client.serial is None and not self.client.dry_run:
+            raise CommandError("Refusing to restore device state without a selected ADB serial.")
+
         # Refuse restore on device mismatch
-        current_metadata = self.client.get_device_metadata()
+        current_metadata = self.client.get_device_metadata_with_fallback()
         saved_device = cast(Dict[str, object], self.store.data.get("device") or {})
 
-        if saved_device:
-            if current_metadata["serial"] != saved_device.get("serial"):
-                raise ValueError(
-                    f"Device serial mismatch: current={current_metadata['serial']}, "
-                    f"saved={saved_device.get('serial')}"
-                )
-
-            current_fp = current_metadata.get("fingerprint")
-            saved_fp = saved_device.get("fingerprint")
-            if current_fp and saved_fp and current_fp != saved_fp:
-                raise ValueError(
-                    f"Device fingerprint mismatch: current={current_fp}, saved={saved_fp}"
-                )
-
         messages: List[str] = []
+
+        if saved_device:
+            saved_serial = saved_device.get("serial")
+            if saved_serial is not None and self.client.serial != saved_serial:
+                raise ValueError(
+                    f"Device serial mismatch: current={self.client.serial}, "
+                    f"saved={saved_serial}"
+                )
+
+            current_fp = current_metadata.get("fingerprint") or ""
+            saved_fp = saved_device.get("fingerprint") or ""
+            if saved_fp and current_fp:
+                if current_fp != saved_fp:
+                    raise ValueError(
+                        f"Device fingerprint mismatch: current={current_fp}, saved={saved_fp}"
+                    )
+            elif saved_fp and not current_fp:
+                warning = (
+                    "Warning: could not verify device fingerprint; proceeding with serial match only."
+                )
+                messages.append(warning)
+                self.client.output(warning)
+
         had_failures = False
         settings = cast(Dict[str, Dict[str, object]], self.store.data["settings"])
         device_config = cast(Dict[str, Dict[str, object]], self.store.data["device_config"])
