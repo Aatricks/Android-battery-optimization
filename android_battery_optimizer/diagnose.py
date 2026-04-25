@@ -88,15 +88,21 @@ class Diagnoser:
         except Exception:
             return None
 
+    def _has_package_signal(self, pkg: str, dumpsys_output: str) -> bool:
+        if not dumpsys_output:
+            return False
+        pattern = re.compile(rf'(?:^|[^a-zA-Z0-9_.])({re.escape(pkg)})(?:[^a-zA-Z0-9_.]|$)')
+        return bool(pattern.search(dumpsys_output))
+
     def _parse_signals(self, pkg: str, dumpsys: Dict[str, str]) -> Dict[str, Any]:
-        alarms_seen = pkg in dumpsys["alarm"] if dumpsys["alarm"] else None
-        jobs_seen = pkg in dumpsys["jobscheduler"] if dumpsys["jobscheduler"] else None
-        wakelocks_seen = pkg in dumpsys["batterystats"] if dumpsys["batterystats"] else None
+        alarms_seen = self._has_package_signal(pkg, dumpsys["alarm"]) if dumpsys["alarm"] else None
+        jobs_seen = self._has_package_signal(pkg, dumpsys["jobscheduler"]) if dumpsys["jobscheduler"] else None
+        wakelocks_seen = self._has_package_signal(pkg, dumpsys["batterystats"]) if dumpsys["batterystats"] else None
         
         last_used_hint = None
         if dumpsys["usagestats"]:
             for line in dumpsys["usagestats"].splitlines():
-                if pkg in line and "lastTimeUsed" in line:
+                if self._has_package_signal(pkg, line) and "lastTimeUsed" in line:
                     m = re.search(r'lastTimeUsed="([^"]+)"', line)
                     if m:
                         last_used_hint = m.group(1)

@@ -16,6 +16,47 @@ class TestCLICommands(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_parse_diagnose_subcommand(self):
+        args = parse_args(["diagnose"])
+        self.assertEqual(args.command, "diagnose")
+        self.assertTrue(args.third_party_only)
+        self.assertIsNone(args.output)
+
+    def test_parse_diagnose_output(self):
+        args = parse_args(["diagnose", "--output", "report.json"])
+        self.assertEqual(args.command, "diagnose")
+        self.assertEqual(args.output, "report.json")
+
+    def test_parse_diagnose_all_packages(self):
+        args = parse_args(["diagnose", "--all-packages"])
+        self.assertEqual(args.command, "diagnose")
+        self.assertFalse(args.third_party_only)
+
+    def test_parse_smart_restrict_subcommand(self):
+        args = parse_args(["smart-restrict"])
+        self.assertEqual(args.command, "smart-restrict")
+        self.assertFalse(args.yes)
+        self.assertFalse(args.aggressive)
+        self.assertIsNone(args.min_last_used_days)
+
+    def test_parse_smart_restrict_aggressive_yes(self):
+        args = parse_args(["smart-restrict", "--aggressive", "--yes"])
+        self.assertEqual(args.command, "smart-restrict")
+        self.assertTrue(args.yes)
+        self.assertTrue(args.aggressive)
+
+    def test_parse_smart_restrict_min_last_used_days(self):
+        args = parse_args(["smart-restrict", "--min-last-used-days", "14", "--yes"])
+        self.assertEqual(args.command, "smart-restrict")
+        self.assertTrue(args.yes)
+        self.assertEqual(args.min_last_used_days, 14)
+
+    def test_parse_smart_restrict_dry_run_after_subcommand(self):
+        # Even if --dry-run is placed before or after, parse_args handles it correctly since it's a parent_parser arg
+        args = parse_args(["smart-restrict", "--dry-run"])
+        self.assertEqual(args.command, "smart-restrict")
+        self.assertTrue(args.dry_run)
+
     @patch("android_battery_optimizer.cli.BatteryOptimizerCLI.check_environment")
     @patch("android_battery_optimizer.app.BatteryOptimizerApp.get_device_info")
     @patch("android_battery_optimizer.app.BatteryOptimizerApp.apply_experimental_optimizations")

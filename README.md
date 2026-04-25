@@ -86,6 +86,8 @@ The tool supports direct subcommands for automation:
 | Command | Description |
 |---------|-------------|
 | `status` | Checks ADB environment and device info |
+| `diagnose` | Run battery diagnostics on installed apps |
+| `smart-restrict` | Intelligently restrict apps based on usage and diagnostics |
 | `apply-safe` | Applies documented safe optimizations |
 | `apply-experimental --yes` | Applies experimental optimizations (requires --yes) |
 | `apply-samsung-experimental --yes` | Applies Samsung optimizations (requires --yes) |
@@ -99,6 +101,18 @@ The tool supports direct subcommands for automation:
 - `--serial <id>`: Target a specific device serial.
 - `--dry-run`: Show what would happen without making changes.
 - `--state-dir <path>`: Use a custom directory for state and whitelist.
+
+### Smart Restrict Examples
+`smart-restrict` is measurement-driven and conservative. It uses `diagnose` to identify background activity and only restricts apps that show high drain or are explicitly targeted.
+- `optimizer.py smart-restrict --dry-run`
+- `optimizer.py smart-restrict --yes`
+- `optimizer.py smart-restrict --aggressive --yes`
+- `optimizer.py smart-restrict --min-last-used-days 14 --yes`
+
+### Diagnose Examples
+- `optimizer.py diagnose`
+- `optimizer.py diagnose --output report.json`
+- `optimizer.py diagnose --all-packages`
 
 ## Troubleshooting
 
@@ -114,7 +128,7 @@ The tool supports direct subcommands for automation:
 Mutable files are stored under:
 `~/.local/state/android-battery-optimizer/`
 
-- `whitelist.txt`: List of packages to exclude from restrictions.
+- `devices/<serial>/whitelist.txt`: List of packages to exclude from restrictions for the specific device.
 - `devices/<serial>/state.json`: Rollback snapshot for that specific device.
 
 ## Whitelist Behavior

@@ -49,6 +49,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser_restrict.add_argument("--level", choices=["ignore", "deny", "allow"], default="ignore")
     parser_restrict.add_argument("--yes", action="store_true", help="Confirm restriction")
 
+    parser_diagnose = add_subparser("diagnose", help="Run battery diagnostics")
+    parser_diagnose.add_argument("--output", help="Save report to specified JSON file")
+    
+    # We want --third-party-only to be the default, but let user toggle it with --all-packages
+    # We'll use a dest variable that defaults to True for third_party_only.
+    # The requirement is: --third-party-only / --all-packages, default third-party only
+    diag_group = parser_diagnose.add_mutually_exclusive_group()
+    diag_group.add_argument("--third-party-only", action="store_true", default=True, help="Only diagnose third-party apps (default)")
+    diag_group.add_argument("--all-packages", action="store_false", dest="third_party_only", help="Diagnose all apps")
+
+    parser_smart_restrict = add_subparser("smart-restrict", help="Intelligently restrict apps based on usage")
+    parser_smart_restrict.add_argument("--yes", action="store_true", help="Confirm smart restriction")
+    parser_smart_restrict.add_argument("--aggressive", action="store_true", help="Use aggressive restriction mode")
+    parser_smart_restrict.add_argument("--min-last-used-days", type=int, help="Skip restriction for apps used within this many days")
+
     add_subparser("revert", help="Reverts saved state for selected serial")
 
     parser_wl = add_subparser("whitelist", help="Manage whitelist")

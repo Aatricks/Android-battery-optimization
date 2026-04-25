@@ -316,6 +316,17 @@ class BatteryOptimizerApp:
         
         report = self.diagnose(third_party_only=True)
         
+        if any("Failed to list packages" in w for w in report.get("warnings", [])):
+            raise ValueError("Diagnose could not list packages.")
+            
+        if not report["packages"]:
+            installed = self.get_packages(third_party=True)
+            if installed:
+                raise ValueError("Diagnostic report yielded no packages but third-party packages exist.")
+                
+        import time
+        current_time_ms = time.time() * 1000
+        
         with self.recorder.transaction():
             self.recorder.prefetch_package_states()
             for pkg_info in report["packages"]:
@@ -323,6 +334,21 @@ class BatteryOptimizerApp:
                 if pkg in whitelist or pkg in critical:
                     skipped.append(pkg)
                     continue
+                    
+                if min_last_used_days is not None:
+                    last_used_hint = pkg_info.get("signals", {}).get("last_used_hint")
+                    try:
+                        if last_used_hint is not None:
+                            last_used_ms = float(last_used_hint)
+                            if (current_time_ms - last_used_ms) < (min_last_used_days * 86400 * 1000):
+                                skipped.append(pkg)
+                                continue
+                        else:
+                            skipped.append(pkg)
+                            continue
+                    except ValueError:
+                        skipped.append(pkg)
+                        continue
                 
                 rec = pkg_info["recommendation"]
                 

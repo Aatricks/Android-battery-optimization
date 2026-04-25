@@ -82,3 +82,23 @@ class TestDiagnose(unittest.TestCase):
         pkg = report["packages"][0]
         self.assertIn("recommendation", pkg)
         self.assertIn("signals", pkg)
+
+    def test_diagnose_package_boundary_no_false_positive(self):
+        diagnoser = Diagnoser(self.client)
+        # Check that 'com.foo' does not match 'com.foobar' or 'com.foo.bar'
+        self.assertFalse(diagnoser._has_package_signal("com.foo", "com.foobar"))
+        self.assertFalse(diagnoser._has_package_signal("com.foo", "com.foo.bar"))
+        self.assertFalse(diagnoser._has_package_signal("com.foo", "a.com.foo"))
+        self.assertFalse(diagnoser._has_package_signal("com.foo", "com_foo"))
+        self.assertFalse(diagnoser._has_package_signal("com.foo", "com.foo1"))
+        
+    def test_diagnose_exact_package_signal_detected(self):
+        diagnoser = Diagnoser(self.client)
+        # Check valid boundaries
+        self.assertTrue(diagnoser._has_package_signal("com.foo", "com.foo"))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", " com.foo "))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", "\ncom.foo\n"))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", "uid:com.foo,"))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", "package=com.foo "))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", "package:com.foo"))
+        self.assertTrue(diagnoser._has_package_signal("com.foo", '"com.foo"'))
