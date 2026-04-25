@@ -732,7 +732,7 @@ class OptimizerTests(unittest.TestCase):
             # Verify readback was called
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "some_key"],
-                capture_output=True, text=True, input=None, timeout=None
+                capture_output=True, text=True, input=None, timeout=30
             )
 
     @patch("android_battery_optimizer.adb.subprocess.run")
@@ -822,11 +822,11 @@ class OptimizerTests(unittest.TestCase):
             # Verify both were read back
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "s1"],
-                capture_output=True, text=True, input=None, timeout=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "s2"],
-                capture_output=True, text=True, input=None, timeout=None
+                capture_output=True, text=True, input=None, timeout=30
             )
 
 

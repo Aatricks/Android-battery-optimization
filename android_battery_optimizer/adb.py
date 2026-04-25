@@ -171,7 +171,7 @@ class AdbClient:
                 self.output(f"[dry-run-input]\n{input_data}")
             return CommandResult(returncode=0, stdout="", stderr="")
 
-        if timeout is None and mutate:
+        if timeout is None:
             timeout = self.DEFAULT_TIMEOUT_SECONDS
 
         result = self.runner.run(command, input_data=input_data, timeout=timeout)
@@ -220,12 +220,16 @@ class AdbClient:
         input_data: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> str:
+        str_args = self._stringify(args)
+        if timeout is None and str_args and str_args[0] == "adb":
+            timeout = self.DEFAULT_TIMEOUT_SECONDS
+
         result = self.runner.run(
-            self._stringify(args), input_data=input_data, timeout=timeout
+            str_args, input_data=input_data, timeout=timeout
         )
         if check and result.returncode != 0:
             details = result.stderr.strip() or result.stdout.strip() or "unknown error"
             raise CommandError(
-                f"{self._format(self._stringify(args))} failed: {details}", result=result
+                f"{self._format(str_args)} failed: {details}", result=result
             )
         return result.stdout.strip()
