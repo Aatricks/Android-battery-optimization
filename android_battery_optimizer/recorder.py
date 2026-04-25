@@ -1,17 +1,30 @@
 import re
 from contextlib import contextmanager
 from typing import Callable, Dict, List, Optional, Sequence, cast
+
 from .adb import AdbClient, CommandError
 from .state import StateStore
 from .operations import STANDBY_BUCKET_MAP
 
+from .ledger import AnyLedgerEntry
+from .snapshot import (
+    SnapshotError,
+    read_settings_namespace,
+    read_device_config_namespace,
+    prefetch_package_states
+)
+from .verification import (
+    VerificationError,
+    normalize_value,
+    verify_setting,
+    verify_device_config,
+    verify_appop,
+    verify_standby_bucket,
+    verify_package_enabled
+)
+from .rollback import perform_rollback, restore_appop_value, restore_state
+
 PACKAGE_USER_ID = "0"
-
-class SnapshotError(RuntimeError):
-    pass
-
-class VerificationError(RuntimeError):
-    pass
 
 class StateRecorder:
     def __init__(self, client: AdbClient, store: StateStore) -> None:
@@ -25,19 +38,14 @@ class StateRecorder:
         self._appops_cache: Dict[str, Dict[str, str]] = {}
         self._standby_bucket_cache: Dict[str, str] = {}
         self._package_enabled_cache: Dict[str, bool] = {}
-        self._ledger: List[Dict[str, object]] = []
+        self._ledger: List[AnyLedgerEntry] = []
         self._prefetch_package_enabled_success = False
         self._prefetch_appops_success = False
         self._prefetch_standby_bucket_success = False
 
     @staticmethod
     def _normalize_value(value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        stripped = value.strip()
-        if stripped in {"", "null", "None", "undefined"}:
-            return None
-        return stripped
+        return normalize_value(value)
 
     @contextmanager
     def transaction(self):
@@ -100,8 +108,7 @@ class StateRecorder:
             self.client.shell(args, mutate=True)
 
     def _restore_appop_value(self, package: str, op: str, prior_value: Optional[str]) -> None:
-        value = "default" if prior_value is None else str(prior_value)
-        self.client.shell(["cmd", "appops", "set", package, op, value], mutate=True)
+        restore_appop_value(self.client, package, op, prior_value)
 
     def _revert_ledger(self, successful_indices: Optional[List[int]] = None) -> None:
         entries_to_revert = []
@@ -129,43 +136,10 @@ class StateRecorder:
 
         self.store.save_or_clear()
 
-    def _perform_rollback(self, entry: Dict[str, object]) -> None:
-        type_ = entry["type"]
-        if type_ == "setting":
-            namespace = str(entry["namespace"])
-            key = str(entry["key"])
-            prior_value = entry["prior_value"]
-            if prior_value is None:
-                self.client.shell(["settings", "delete", namespace, key], mutate=True)
-            else:
-                self.client.shell(["settings", "put", namespace, key, prior_value], mutate=True)
-        elif type_ == "device_config":
-            namespace = str(entry["namespace"])
-            key = str(entry["key"])
-            prior_value = entry["prior_value"]
-            if prior_value is None:
-                self.client.shell(["device_config", "delete", namespace, key], mutate=True)
-            else:
-                self.client.shell(["device_config", "put", namespace, key, prior_value], mutate=True)
-        elif type_ == "appop":
-            package = str(entry["package"])
-            op = str(entry["op"])
-            prior_value = entry["prior_value"]
-            self._restore_appop_value(package, op, prior_value)
-        elif type_ == "standby_bucket":
-            package = str(entry["package"])
-            prior_value = entry["prior_value"]
-            if prior_value:
-                self.client.shell(["am", "set-standby-bucket", package, str(prior_value)], mutate=True)
-        elif type_ == "package_enabled":
-            package = str(entry["package"])
-            prior_value = bool(entry["prior_value"])
-            command = ["pm", "enable", "--user", PACKAGE_USER_ID, package]
-            if not prior_value:
-                command = ["pm", "disable-user", "--user", PACKAGE_USER_ID, package]
-            self.client.shell(command, mutate=True)
+    def _perform_rollback(self, entry: AnyLedgerEntry) -> None:
+        perform_rollback(self.client, entry)
 
-    def _remove_snapshot_for_entry(self, entry: Dict[str, object]) -> None:
+    def _remove_snapshot_for_entry(self, entry: AnyLedgerEntry) -> None:
         type_ = entry["type"]
         if type_ == "setting":
             snapshot_key = f"{entry['namespace']}/{entry['key']}"
@@ -190,7 +164,7 @@ class StateRecorder:
                 self.store.data["packages"][package]["enabled"] = None
                 self._cleanup_package_entry(package)
 
-    def _remove_snapshots_for_entries(self, entries: List[Dict[str, object]]) -> None:
+    def _remove_snapshots_for_entries(self, entries: List[AnyLedgerEntry]) -> None:
         for entry in entries:
             self._remove_snapshot_for_entry(entry)
 
@@ -199,7 +173,7 @@ class StateRecorder:
         if pkg and not pkg["appops"] and pkg["standby_bucket"] is None and pkg["enabled"] is None:
             self.store.data["packages"].pop(package)
 
-    def _persist_failed_rollback(self, entry: Dict[str, object]) -> None:
+    def _persist_failed_rollback(self, entry: AnyLedgerEntry) -> None:
         type_ = entry["type"]
         if type_ == "setting":
             store = self.store.data["settings"]
@@ -208,7 +182,7 @@ class StateRecorder:
                 store[snapshot_key] = {
                     "namespace": entry["namespace"],
                     "key": entry["key"],
-                    "value": entry["prior_value"],
+                    "value": entry.get("prior_value"),
                 }
         elif type_ == "device_config":
             store = self.store.data["device_config"]
@@ -217,94 +191,37 @@ class StateRecorder:
                 store[snapshot_key] = {
                     "namespace": entry["namespace"],
                     "key": entry["key"],
-                    "value": entry["prior_value"],
+                    "value": entry.get("prior_value"),
                 }
         elif type_ == "appop":
             package = str(entry["package"])
             op = str(entry["op"])
             pkg_entry = self._package_entry(package)
             if op not in pkg_entry["appops"]:
-                pkg_entry["appops"][op] = entry["prior_value"]
+                pkg_entry["appops"][op] = entry.get("prior_value")
         elif type_ == "standby_bucket":
             package = str(entry["package"])
             pkg_entry = self._package_entry(package)
             if pkg_entry["standby_bucket"] is None:
-                pkg_entry["standby_bucket"] = entry["prior_value"]
+                pkg_entry["standby_bucket"] = entry.get("prior_value")
         elif type_ == "package_enabled":
             package = str(entry["package"])
             pkg_entry = self._package_entry(package)
             if pkg_entry["enabled"] is None:
-                pkg_entry["enabled"] = entry["prior_value"]
+                pkg_entry["enabled"] = entry.get("prior_value")
 
     def prefetch_package_states(self) -> None:
-        try:
-            disabled = self.client.shell_text([
-                "pm",
-                "list",
-                "packages",
-                "--user",
-                PACKAGE_USER_ID,
-                "-d",
-            ])
-            enabled = self.client.shell_text([
-                "pm",
-                "list",
-                "packages",
-                "--user",
-                PACKAGE_USER_ID,
-                "-e",
-            ])
-            for line in disabled.splitlines():
-                if ":" in line:
-                    self._package_enabled_cache[line.split(":", 1)[1].strip()] = False
-            for line in enabled.splitlines():
-                if ":" in line:
-                    self._package_enabled_cache[line.split(":", 1)[1].strip()] = True
-            self._prefetch_package_enabled_success = True
-        except CommandError:
-            self._prefetch_package_enabled_success = False
-
-        try:
-            appops = self.client.shell_text(["dumpsys", "appops"])
-            current_pkg = None
-            for line in appops.splitlines():
-                pkg_match = re.search(r"Package\s+([a-zA-Z0-9_\.]+):", line)
-                if pkg_match:
-                    current_pkg = pkg_match.group(1)
-                    self._appops_cache.setdefault(current_pkg, {})
-                    continue
-                if current_pkg:
-                    op_match = re.search(r"\s+([A-Z_a-z0-9]+):\s*([a-zA-Z0-9_]+)", line)
-                    if op_match:
-                        self._appops_cache.setdefault(current_pkg, {})[op_match.group(1)] = op_match.group(2)
-            self._prefetch_appops_success = True
-        except CommandError:
-            self._prefetch_appops_success = False
-
-        try:
-            usagestats = self.client.shell_text(["dumpsys", "usagestats"])
-            for line in usagestats.splitlines():
-                if "package=" in line and "bucket=" in line:
-                    pkg_match = re.search(r"package=([a-zA-Z0-9_\.]+)", line)
-                    bucket_match = re.search(r"bucket=(\d+|[a-zA-Z_]+)", line)
-                    if pkg_match and bucket_match:
-                        self._standby_bucket_cache[pkg_match.group(1)] = bucket_match.group(1)
-            self._prefetch_standby_bucket_success = True
-        except CommandError:
-            self._prefetch_standby_bucket_success = False
+        (
+            self._prefetch_package_enabled_success,
+            self._package_enabled_cache,
+            self._prefetch_appops_success,
+            self._appops_cache,
+            self._prefetch_standby_bucket_success,
+            self._standby_bucket_cache
+        ) = prefetch_package_states(self.client)
 
     def _read_settings_namespace(self, namespace: str) -> Dict[str, str]:
-        result = self.client.shell(["settings", "list", namespace], check=False)
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            raise SnapshotError(f"Failed to list settings in {namespace}: {err}")
-
-        cache = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                cache[k.strip()] = v.strip()
-        return cache
+        return read_settings_namespace(self.client, namespace)
 
     def _get_setting(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._settings_cache:
@@ -326,13 +243,13 @@ class StateRecorder:
                 "value": value,
             }
             self.store.save()
-        self._ledger.append({
+        self._ledger.append(cast(AnyLedgerEntry, {
             "type": "setting",
             "namespace": namespace,
             "key": key,
             "prior_value": value,
             "new_value": self._normalize_value(new_value),
-        })
+        }))
 
     def put_setting(self, namespace: str, key: str, value: object, verify: bool = True) -> None:
         self.snapshot_setting(namespace, key, new_value=str(value))
@@ -355,17 +272,7 @@ class StateRecorder:
                 raise
 
     def _read_device_config_namespace(self, namespace: str) -> Dict[str, str]:
-        result = self.client.shell(["device_config", "list", namespace], check=False)
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            raise SnapshotError(f"Failed to list device_config in {namespace}: {err}")
-
-        cache = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                cache[k.strip()] = v.strip()
-        return cache
+        return read_device_config_namespace(self.client, namespace)
 
     def _get_device_config(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._device_config_cache:
@@ -387,13 +294,13 @@ class StateRecorder:
                 "value": value,
             }
             self.store.save()
-        self._ledger.append({
+        self._ledger.append(cast(AnyLedgerEntry, {
             "type": "device_config",
             "namespace": namespace,
             "key": key,
             "prior_value": value,
             "new_value": self._normalize_value(new_value),
-        })
+        }))
 
     def put_device_config(self, namespace: str, key: str, value: object, verify: bool = True) -> None:
         self.snapshot_device_config(namespace, key, new_value=str(value))
@@ -437,12 +344,12 @@ class StateRecorder:
         if entry["enabled"] is None:
             entry["enabled"] = value
             self.store.save()
-        self._ledger.append({
+        self._ledger.append(cast(AnyLedgerEntry, {
             "type": "package_enabled",
             "package": package,
             "prior_value": value,
             "new_value": new_value,
-        })
+        }))
 
     def _get_appop(self, package: str, op: str) -> str:
         if not self._prefetch_appops_success:
@@ -457,13 +364,13 @@ class StateRecorder:
         if op not in entry["appops"]:
             entry["appops"][op] = value
             self.store.save()
-        self._ledger.append({
+        self._ledger.append(cast(AnyLedgerEntry, {
             "type": "appop",
             "package": package,
             "op": op,
             "prior_value": value,
             "new_value": new_value,
-        })
+        }))
 
     def _get_standby_bucket(self, package: str) -> str:
         if not self._prefetch_standby_bucket_success or package not in self._standby_bucket_cache:
@@ -476,12 +383,12 @@ class StateRecorder:
         if entry["standby_bucket"] is None:
             entry["standby_bucket"] = value
             self.store.save()
-        self._ledger.append({
+        self._ledger.append(cast(AnyLedgerEntry, {
             "type": "standby_bucket",
             "package": package,
             "prior_value": value,
             "new_value": new_value,
-        })
+        }))
 
     def set_package_enabled(self, package: str, enabled: bool, verify: bool = True) -> None:
         self.snapshot_package_enabled(package, new_value=enabled)
@@ -517,145 +424,21 @@ class StateRecorder:
                 raise
 
     def verify_setting(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
-        if self.client.dry_run:
-            return
-        result = self.client.shell(["settings", "get", namespace, key], check=False)
-        if result.returncode != 0:
-            raise VerificationError(
-                f"Verification failed for setting {namespace}/{key}: "
-                f"read command failed with exit code {result.returncode}"
-            )
-        actual = self._normalize_value(result.stdout)
-        expected = self._normalize_value(expected_value)
-        if actual != expected:
-            raise VerificationError(
-                f"Verification failed for setting {namespace}/{key}: "
-                f"expected {expected}, got {actual}"
-            )
+        verify_setting(self.client, namespace, key, expected_value)
 
     def verify_device_config(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
-        if self.client.dry_run:
-            return
-        result = self.client.shell(["device_config", "get", namespace, key], check=False)
-        if result.returncode != 0:
-            raise VerificationError(
-                f"Verification failed for device_config {namespace}/{key}: "
-                f"read command failed with exit code {result.returncode}"
-            )
-        actual = self._normalize_value(result.stdout)
-        expected = self._normalize_value(expected_value)
-        if actual != expected:
-            raise VerificationError(
-                f"Verification failed for device_config {namespace}/{key}: "
-                f"expected {expected}, got {actual}"
-            )
+        verify_device_config(self.client, namespace, key, expected_value)
 
     def verify_appop(self, package: str, op: str, expected_value: str) -> None:
-        if self.client.dry_run:
-            return
-        result = self.client.shell(["cmd", "appops", "get", package, op], check=False)
-        if result.returncode != 0:
-            raise VerificationError(
-                f"Verification failed for appop {op} for package {package}: "
-                f"read command failed with exit code {result.returncode}"
-            )
-        output = result.stdout.strip()
-        actual = self._parse_appop_output(output)
-        expected = self._normalize_value(expected_value)
-        if expected is not None:
-            expected = expected.lower()
-
-        if expected == "default":
-            if actual not in {"default", "no operations.", "no overrides."}:
-                raise VerificationError(
-                    f"Verification failed for appop {op} for package {package}: "
-                    f"expected default, got {actual}"
-                )
-            return
-
-        if actual != expected:
-            raise VerificationError(
-                f"Verification failed for appop {op} for package {package}: "
-                f"expected {expected_value}, got {actual}"
-            )
-
-    def _parse_appop_output(self, output: str) -> str:
-        normalized_output = output.strip()
-        if not normalized_output:
-            raise VerificationError(f"Verification failed for appop: could not parse command output: {output}")
-
-        if normalized_output in {"No operations.", "No overrides."}:
-            return "default"
-
-        for line in normalized_output.splitlines():
-            candidate = line.strip()
-            if not candidate:
-                continue
-            if candidate in {"No operations.", "No overrides."}:
-                return "default"
-            match = re.match(
-                r"^(?:(?:[A-Z_a-z0-9]+)\s*:\s*)?(?:mode\s*[:=]\s*)?(?P<value>[A-Za-z0-9_]+)(?:\s*;.*)?$",
-                candidate,
-            )
-            if match:
-                return match.group("value").lower()
-
-        raise VerificationError(
-            f"Verification failed for appop: could not parse command output: {output}"
-        )
+        verify_appop(self.client, package, op, expected_value)
 
     def verify_standby_bucket(self, package: str, expected_bucket: str) -> None:
-        if self.client.dry_run:
-            return
-        result = self.client.shell(["am", "get-standby-bucket", package], check=False)
-        if result.returncode != 0:
-            raise VerificationError(
-                f"Verification failed for standby bucket for package {package}: "
-                f"read command failed with exit code {result.returncode}"
-            )
-        actual = result.stdout.strip()
-        expected_code = STANDBY_BUCKET_MAP.get(expected_bucket.lower(), expected_bucket)
-        if actual != expected_code:
-            raise VerificationError(
-                f"Verification failed for standby bucket for package {package}: "
-                f"expected {expected_bucket} ({expected_code}), got {actual}"
-            )
+        verify_standby_bucket(self.client, package, expected_bucket)
 
     def verify_package_enabled(self, package: str, expected_enabled: bool) -> None:
-        if self.client.dry_run:
-            return
-        result = self.client.shell(
-            [
-                "pm",
-                "list",
-                "packages",
-                "--user",
-                PACKAGE_USER_ID,
-                "-e" if expected_enabled else "-d",
-                package,
-            ],
-            check=False,
-        )
-        if result.returncode != 0:
-            raise VerificationError(
-                f"Verification failed for package {package} enabled state: "
-                f"package-enabled verification readback failed with exit code {result.returncode}"
-            )
+        verify_package_enabled(self.client, package, expected_enabled)
 
-        output = result.stdout.strip()
-        found = False
-        for line in output.splitlines():
-            if line.strip() == f"package:{package}":
-                found = True
-                break
-        if not found:
-            actual = "enabled" if not expected_enabled else "disabled/missing"
-            raise VerificationError(
-                f"Verification failed for package {package} enabled state: "
-                f"expected {expected_enabled}, but package is {actual}"
-            )
-
-    def _verify_entry(self, entry: Dict[str, object]) -> None:
+    def _verify_entry(self, entry: AnyLedgerEntry) -> None:
         type_ = entry["type"]
         new_value = entry.get("new_value")
         if type_ == "setting":
@@ -677,197 +460,5 @@ class StateRecorder:
         elif type_ == "package_enabled":
             self.verify_package_enabled(str(entry["package"]), bool(new_value))
 
-    def _restore_and_verify(
-        self,
-        restore_action: Callable[[], object],
-        verify_action: Callable[[], None],
-    ) -> None:
-        restore_action()
-        verify_action()
-
     def restore(self) -> List[str]:
-        if self.client.serial is None and not self.client.dry_run:
-            raise CommandError("Refusing to restore device state without a selected ADB serial.")
-
-        # Refuse restore on device mismatch
-        current_metadata = self.client.get_device_metadata_with_fallback()
-        saved_device = cast(Dict[str, object], self.store.data.get("device") or {})
-
-        messages: List[str] = []
-
-        if saved_device:
-            saved_serial = saved_device.get("serial")
-            if saved_serial is not None and self.client.serial != saved_serial:
-                raise ValueError(
-                    f"Device serial mismatch: current={self.client.serial}, "
-                    f"saved={saved_serial}"
-                )
-
-            current_fp = current_metadata.get("fingerprint") or ""
-            saved_fp = saved_device.get("fingerprint") or ""
-            if saved_fp and current_fp:
-                if current_fp != saved_fp:
-                    raise ValueError(
-                        f"Device fingerprint mismatch: current={current_fp}, saved={saved_fp}"
-                    )
-            elif saved_fp and not current_fp:
-                warning = (
-                    "Warning: could not verify device fingerprint; proceeding with serial match only."
-                )
-                messages.append(warning)
-                self.client.output(warning)
-
-        had_failures = False
-        settings = cast(Dict[str, Dict[str, object]], self.store.data["settings"])
-        device_config = cast(Dict[str, Dict[str, object]], self.store.data["device_config"])
-        packages = cast(Dict[str, Dict[str, object]], self.store.data["packages"])
-
-        for item in list(settings.values()):
-            namespace = cast(str, item["namespace"])
-            key = cast(str, item["key"])
-            value = cast(Optional[str], item["value"])
-            try:
-                if value is None:
-                    self._restore_and_verify(
-                        lambda: self.client.shell(["settings", "delete", namespace, key], mutate=True),
-                        lambda: self.verify_setting(namespace, key, None),
-                    )
-                else:
-                    self._restore_and_verify(
-                        lambda: self.client.shell(
-                            ["settings", "put", namespace, key, value],
-                            mutate=True,
-                        ),
-                        lambda: self.verify_setting(namespace, key, value),
-                    )
-                messages.append(f"Restored setting {namespace}/{key}")
-                if not self.client.dry_run:
-                    self._remove_snapshot_for_entry(
-                        {
-                            "type": "setting",
-                            "namespace": namespace,
-                            "key": key,
-                        }
-                    )
-            except (CommandError, VerificationError) as exc:
-                had_failures = True
-                msg = f"Failed to restore setting {namespace}/{key}: {exc}"
-                messages.append(msg)
-                self.client.output(msg)
-
-        for item in list(device_config.values()):
-            namespace = cast(str, item["namespace"])
-            key = cast(str, item["key"])
-            value = cast(Optional[str], item["value"])
-            try:
-                if value is None:
-                    self._restore_and_verify(
-                        lambda: self.client.shell(
-                            ["device_config", "delete", namespace, key],
-                            mutate=True,
-                        ),
-                        lambda: self.verify_device_config(namespace, key, None),
-                    )
-                else:
-                    self._restore_and_verify(
-                        lambda: self.client.shell(
-                            ["device_config", "put", namespace, key, value],
-                            mutate=True,
-                        ),
-                        lambda: self.verify_device_config(namespace, key, value),
-                    )
-                messages.append(f"Restored device_config {namespace}/{key}")
-                if not self.client.dry_run:
-                    self._remove_snapshot_for_entry(
-                        {
-                            "type": "device_config",
-                            "namespace": namespace,
-                            "key": key,
-                        }
-                    )
-            except (CommandError, VerificationError) as exc:
-                had_failures = True
-                msg = f"Failed to restore device_config {namespace}/{key}: {exc}"
-                messages.append(msg)
-                self.client.output(msg)
-
-        for package, item in list(packages.items()):
-            appops = cast(Dict[str, Optional[str]], item["appops"])
-            for op, value in list(appops.items()):
-                try:
-                    self._restore_and_verify(
-                        lambda: self._restore_appop_value(package, op, value),
-                        lambda: self.verify_appop(package, op, str(value)),
-                    )
-                    messages.append(f"Restored {package} appop {op}")
-                    if not self.client.dry_run:
-                        self._remove_snapshot_for_entry(
-                            {
-                                "type": "appop",
-                                "package": package,
-                                "op": op,
-                            }
-                        )
-                except (CommandError, VerificationError) as exc:
-                    had_failures = True
-                    msg = f"Failed to restore {package} appop {op}: {exc}"
-                    messages.append(msg)
-                    self.client.output(msg)
-
-            bucket = cast(Optional[str], item.get("standby_bucket"))
-            if bucket is not None:
-                try:
-                    self._restore_and_verify(
-                        lambda: self.client.shell(
-                            ["am", "set-standby-bucket", package, bucket],
-                            mutate=True,
-                        ),
-                        lambda: self.verify_standby_bucket(package, str(bucket)),
-                    )
-                    messages.append(f"Restored {package} standby bucket")
-                    if not self.client.dry_run:
-                        self._remove_snapshot_for_entry(
-                            {
-                                "type": "standby_bucket",
-                                "package": package,
-                            }
-                        )
-                except (CommandError, VerificationError) as exc:
-                    had_failures = True
-                    msg = f"Failed to restore {package} standby bucket: {exc}"
-                    messages.append(msg)
-                    self.client.output(msg)
-
-            enabled = cast(Optional[bool], item.get("enabled"))
-            if enabled is not None:
-                try:
-                    command = ["pm", "enable", "--user", PACKAGE_USER_ID, package]
-                    if not enabled:
-                        command = ["pm", "disable-user", "--user", PACKAGE_USER_ID, package]
-                    self._restore_and_verify(
-                        lambda: self.client.shell(command, mutate=True),
-                        lambda: self.verify_package_enabled(package, enabled),
-                    )
-                    messages.append(f"Restored {package} enabled state")
-                    if not self.client.dry_run:
-                        self._remove_snapshot_for_entry(
-                            {
-                                "type": "package_enabled",
-                                "package": package,
-                            }
-                        )
-                except (CommandError, VerificationError) as exc:
-                    had_failures = True
-                    msg = f"Failed to restore {package} enabled state: {exc}"
-                    messages.append(msg)
-                    self.client.output(msg)
-
-        if self.client.dry_run:
-            return messages
-
-        if had_failures:
-            self.store.save_or_clear()
-            self.client.output("Warning: Partial state corruption due to restore failures.")
-        else:
-            self.store.clear()
-        return messages
+        return restore_state(self.client, self.store, self._remove_snapshot_for_entry)
