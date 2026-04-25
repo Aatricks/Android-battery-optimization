@@ -5,7 +5,7 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional
-from .adb import AdbClient
+from .adb import AdbClient, CommandError
 
 SNAPSHOT_FILE = "state.json"
 
@@ -189,6 +189,8 @@ class StateStore:
     def save(self) -> None:
         if self.client.dry_run:
             return
+        if self.client.serial is None:
+            raise CommandError("Refusing to mutate device state without a selected ADB serial.")
         if getattr(self, "_in_transaction", False):
             self._pending_save = True
             return

@@ -22,18 +22,18 @@ class TestCLICommands(unittest.TestCase):
     def test_apply_experimental_requires_yes_noninteractive(self, mock_apply, mock_get_info, mock_check_env):
         mock_check_env.return_value = True
         mock_get_info.return_value = "Google Pixel 6"
-        
+
         outputs = []
         app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
-        
+
         # Test without --yes
         args = parse_args(["apply-experimental"])
         result = cli.run_command(args)
         self.assertEqual(result, 1)
         self.assertIn("Error: --yes is required", outputs[0])
         mock_apply.assert_not_called()
-        
+
         # Test with --yes
         outputs.clear()
         args = parse_args(["apply-experimental", "--yes"])
@@ -49,7 +49,7 @@ class TestCLICommands(unittest.TestCase):
         outputs = []
         app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
-        
+
         args = parse_args(["apply-safe"])
         result = cli.run_command(args)
         self.assertEqual(result, 0)
@@ -64,7 +64,7 @@ class TestCLICommands(unittest.TestCase):
         outputs = []
         app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
-        
+
         args = parse_args(["revert"])
         result = cli.run_command(args)
         self.assertEqual(result, 0)
@@ -79,18 +79,18 @@ class TestCLICommands(unittest.TestCase):
         mock_check_env.return_value = True
         mock_get_info.return_value = "Samsung S21"
         mock_has_entries.return_value = True
-        
+
         outputs = []
-        client = AdbClient(runner=SubprocessRunner(), serial="serial123")
+        client = AdbClient(runner=SubprocessRunner(), serial="test-device")
         app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
-        
+
         args = parse_args(["status"])
         result = cli.run_command(args)
         self.assertEqual(result, 0)
-        
+
         output_str = "\n".join(outputs)
-        self.assertIn("Selected device: serial123", output_str)
+        self.assertIn("Selected device: test-device", output_str)
         self.assertIn("Device info: Samsung S21", output_str)
         self.assertIn("Rollback state exists: True", output_str)
 
@@ -107,25 +107,48 @@ class TestCLICommands(unittest.TestCase):
     def test_dry_run_subcommand_does_not_create_state(self, mock_run, mock_check_env):
         mock_check_env.return_value = True
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        
+
         outputs = []
-        client = AdbClient(runner=SubprocessRunner(), serial="serial1", dry_run=True)
+        client = AdbClient(runner=SubprocessRunner(), serial="test-device", dry_run=True)
         app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
-        
+
         # Manually trigger something that would normally save state
         with app.recorder.transaction():
             app.recorder.put_setting("global", "test", "1")
-        
-        state_file = self.state_dir / "devices" / "serial1" / "state.json"
+
+        state_file = self.state_dir / "devices" / "test-device" / "state.json"
         self.assertFalse(state_file.exists())
-        
+
         # Now test via cli command
         args = parse_args(["--dry-run", "apply-safe"])
         cli.client.dry_run = True # Ensure it's set
         result = cli.run_command(args)
         self.assertEqual(result, 0)
         self.assertFalse(state_file.exists())
+
+    @patch("android_battery_optimizer.app.BatteryOptimizerApp.apply_documented_safe_optimizations")
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    def test_cli_binds_single_device_before_apply_safe(self, mock_which, mock_run, mock_apply):
+        mock_which.return_value = "/usr/bin/adb"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="List of devices attached\ntest-device\tdevice\n",
+            stderr="",
+        )
+
+        outputs = []
+        client = AdbClient(runner=SubprocessRunner())
+        app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
+        cli = BatteryOptimizerCLI(app=app, output=outputs.append)
+
+        args = parse_args(["apply-safe"])
+        result = cli.run_command(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(cli.client.serial, "test-device")
+        mock_apply.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

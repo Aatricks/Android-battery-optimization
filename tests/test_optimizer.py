@@ -664,11 +664,11 @@ class OptimizerTests(unittest.TestCase):
     def test_adb_shell_uses_default_timeout(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         runner = SubprocessRunner()
-        client = AdbClient(runner=runner)
+        client = AdbClient(runner=runner, serial="test-device")
         client.shell(["settings", "list", "global"], mutate=True)
 
         mock_run.assert_called_with(
-            ["adb", "shell", "settings", "list", "global"],
+            ["adb", "-s", "test-device", "shell", "settings", "list", "global"],
             capture_output=True,
             text=True,
             input=None,
@@ -680,10 +680,11 @@ class OptimizerTests(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "test-device"
             app.run_bg_dexopt()
 
             mock_run.assert_called_with(
-                ["adb", "shell", "cmd", "package", "bg-dexopt-job"],
+                ["adb", "-s", "test-device", "shell", "cmd", "package", "bg-dexopt-job"],
                 capture_output=True,
                 text=True,
                 input=None,

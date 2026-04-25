@@ -128,16 +128,16 @@ class AdbClient:
             info = self.get_device_info_struct()
             if info.sdk_int < 28:
                 return False
-                
+
             result = self.shell(["am", "get-standby-bucket", "android"], check=False)
             if result.returncode == 0 and result.stdout.strip().isdigit():
                 return True
-                
+
             help_result = self.shell(["am", "help"], check=False)
             help_output = help_result.stdout + help_result.stderr
             if "set-standby-bucket" in help_output and "get-standby-bucket" in help_output:
                 return True
-                
+
             return False
         except Exception:
             return False
@@ -151,6 +151,10 @@ class AdbClient:
 
     def adb_exists(self) -> bool:
         return self.runner.which("adb") is not None
+
+    def require_bound_device_for_mutation(self) -> None:
+        if self.serial is None:
+            raise CommandError("Refusing to mutate device state without a selected ADB serial.")
 
     def _base_command(self) -> List[str]:
         command = ["adb"]
@@ -173,6 +177,9 @@ class AdbClient:
         input_data: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> CommandResult:
+        if mutate and not self.dry_run:
+            self.require_bound_device_for_mutation()
+
         command = self._base_command() + self._stringify(args)
         if mutate and self.dry_run:
             self.output(f"[dry-run] {self._format(command)}")
