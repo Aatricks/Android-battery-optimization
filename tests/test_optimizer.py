@@ -309,7 +309,7 @@ class OptimizerTests(unittest.TestCase):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
             if "getprop" in cmd:
-                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout") or 0)
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
@@ -793,13 +793,13 @@ class OptimizerTests(unittest.TestCase):
             app.client.serial = "serial-1"
             app.rebind_device()
 
-            try:
+            with self.assertRaises(RuntimeError) as cm:
                 with app.recorder.transaction():
                     app.recorder.put_setting("global", "some_setting", "value")
                     raise RuntimeError("Pre-dispatch error")
-            except RuntimeError as e:
-                if str(e) != "Pre-dispatch error":
-                    raise
+
+            self.assertIs(type(cm.exception), RuntimeError)
+            self.assertEqual(str(cm.exception), "Pre-dispatch error")
 
             # Revert should NOT be called because batch_dispatched was False
             for call in mock_run.call_args_list:
@@ -815,12 +815,13 @@ class OptimizerTests(unittest.TestCase):
             app.client.serial = "serial-1"
             app.rebind_device()
 
-            try:
+            with self.assertRaises(RuntimeError) as cm:
                 with app.recorder.transaction():
                     app.recorder.put_setting("global", "test_setting", "new_val")
                     raise RuntimeError("Fail before dispatch")
-            except RuntimeError:
-                pass
+
+            self.assertIs(type(cm.exception), RuntimeError)
+            self.assertEqual(str(cm.exception), "Fail before dispatch")
 
             state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
             if state_file.exists():
@@ -943,8 +944,11 @@ class OptimizerTests(unittest.TestCase):
             runner.run(["sleep", "10"], timeout=1.0)
 
         self.assertIn("Command timed out after 1.0s: sleep 10", str(cm.exception))
-        self.assertEqual(cm.exception.result.stdout, "partial stdout")
-        self.assertEqual(cm.exception.result.stderr, "partial stderr")
+        result = cm.exception.result
+        if result is None:
+            self.fail("Expected timeout command error to include a CommandResult")
+        self.assertEqual(result.stdout, "partial stdout")
+        self.assertEqual(result.stderr, "partial stderr")
 
     @patch("android_battery_optimizer.adb.subprocess.run")
     def test_adb_shell_uses_default_timeout(self, mock_run):

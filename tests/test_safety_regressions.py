@@ -35,13 +35,9 @@ class FakeRunner(CommandRunner):
             "cmd_str": cmd_str
         })
 
-        # Exact match or prefix match for responses
+        # Exact match only so malformed command shapes do not slip through.
         if cmd_str in self.responses:
             return self.responses[cmd_str]
-
-        for pattern, response in self.responses.items():
-            if cmd_str.startswith(pattern):
-                return response
 
         return CommandResult(0, "", "")
 
@@ -136,18 +132,19 @@ class TestSafetyRegressions(unittest.TestCase):
 
     # 3. Transactions
     def test_transaction_pre_dispatch_exception(self):
-        client = self.get_client()
+        client = self.get_client(serial="test-device")
         app = self.get_app(client)
 
-        try:
+        with self.assertRaises(RuntimeError) as cm:
             with app.recorder.transaction():
                 app.recorder.snapshot_setting("global", "k1", "v1")
                 raise RuntimeError("Interrupt")
-        except RuntimeError:
-            pass
+
+        self.assertIs(type(cm.exception), RuntimeError)
+        self.assertEqual(str(cm.exception), "Interrupt")
 
         self.assertFalse(app.store.has_entries())
-        state_file = self.test_dir / "devices" / "unknown-device" / "state.json"
+        state_file = self.test_dir / "devices" / "test-device" / "state.json"
         self.assertFalse(state_file.exists())
 
     def test_transaction_full_success(self):
@@ -829,7 +826,6 @@ class TestSafetyRegressions(unittest.TestCase):
         # Mock support
         self.runner.responses["adb -s test-device shell cmd appops help"] = CommandResult(0, "", "")
         self.runner.responses["adb -s test-device shell getprop ro.build.version.sdk"] = CommandResult(0, "30", "")
-        self.runner.responses["adb -s test-device shell am set-standby-bucket"] = CommandResult(0, "", "")
         self.runner.responses["adb -s test-device shell am get-standby-bucket android"] = CommandResult(0, "10\n", "")
 
         # Mock packages
