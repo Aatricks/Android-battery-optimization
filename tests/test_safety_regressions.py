@@ -68,6 +68,22 @@ class TestSafetyRegressions(unittest.TestCase):
     def get_app(self, client):
         return BatteryOptimizerApp(client, self.test_dir)
 
+    def make_saved_state_app(self, state_data, serial="test-device"):
+        client = self.get_client(serial=serial)
+        app = self.get_app(client)
+        metadata = {
+            "serial": serial,
+            "brand": "Google",
+            "model": "Pixel 6",
+            "android_release": "13",
+            "sdk": "33",
+            "fingerprint": "fingerprint-1",
+        }
+        app.client.get_device_metadata = MagicMock(return_value=metadata)
+        app.store.data = json.loads(json.dumps(state_data))
+        app.store.save()
+        return app, metadata
+
     # 1. Dry-run safety
     def test_dry_run_safety(self):
         client = self.get_client(dry_run=True)
@@ -207,37 +223,194 @@ class TestSafetyRegressions(unittest.TestCase):
             app.recorder.set_standby_bucket("com.app", "rare")
 
     # 5. Restore
-    def test_successful_restore_clears_state(self):
-        client = self.get_client(serial="test-device")
-        app = self.get_app(client)
-
-        # Setup some state
-        app.recorder.snapshot_setting("global", "test_key", "old_val")
-        app.store.save()
-        self.assertTrue(app.store.has_entries())
+    def test_partial_restore_removes_successful_setting_keeps_failed_setting(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/setting_a": {"namespace": "global", "key": "setting_a", "value": "1"},
+                "global/setting_b": {"namespace": "global", "key": "setting_b", "value": "2"},
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device shell settings put global setting_a 1"] = CommandResult(0, "", "")
+        self.runner.responses["adb -s test-device shell settings put global setting_b 2"] = CommandResult(1, "", "Failed")
 
         app.recorder.restore()
+
+        self.assertIn("global/setting_b", app.store.data["settings"])
+        self.assertNotIn("global/setting_a", app.store.data["settings"])
+        state_file = self.test_dir / "devices" / "test-device" / "state.json"
+        with state_file.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(list(data["settings"].keys()), ["global/setting_b"])
+
+    def test_partial_restore_removes_successful_device_config_keeps_failed_device_config(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {},
+            "device_config": {
+                "namespace_a/key_a": {"namespace": "namespace_a", "key": "key_a", "value": "1"},
+                "namespace_b/key_b": {"namespace": "namespace_b", "key": "key_b", "value": "2"},
+            },
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device shell device_config put namespace_a key_a 1"] = CommandResult(0, "", "")
+        self.runner.responses["adb -s test-device shell device_config put namespace_b key_b 2"] = CommandResult(1, "", "Failed")
+
+        app.recorder.restore()
+
+        self.assertIn("namespace_b/key_b", app.store.data["device_config"])
+        self.assertNotIn("namespace_a/key_a", app.store.data["device_config"])
+        state_file = self.test_dir / "devices" / "test-device" / "state.json"
+        with state_file.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(list(data["device_config"].keys()), ["namespace_b/key_b"])
+
+    def test_partial_restore_removes_successful_package_appop_keeps_failed_appop(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {},
+            "device_config": {},
+            "packages": {
+                "com.example.app": {
+                    "enabled": None,
+                    "appops": {
+                        "RUN_ANY_IN_BACKGROUND": "allow",
+                        "SYSTEM_ALERT_WINDOW": "ignore",
+                    },
+                    "standby_bucket": None,
+                }
+            },
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses[
+            "adb -s test-device shell cmd appops set com.example.app RUN_ANY_IN_BACKGROUND allow"
+        ] = CommandResult(0, "", "")
+        self.runner.responses[
+            "adb -s test-device shell cmd appops set com.example.app SYSTEM_ALERT_WINDOW ignore"
+        ] = CommandResult(1, "", "Failed")
+
+        app.recorder.restore()
+
+        self.assertIn("com.example.app", app.store.data["packages"])
+        self.assertEqual(
+            app.store.data["packages"]["com.example.app"]["appops"],
+            {"SYSTEM_ALERT_WINDOW": "ignore"},
+        )
+        state_file = self.test_dir / "devices" / "test-device" / "state.json"
+        with state_file.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(data["packages"]["com.example.app"]["appops"], {"SYSTEM_ALERT_WINDOW": "ignore"})
+
+    def test_partial_restore_cleans_empty_package_entries(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {},
+            "device_config": {},
+            "packages": {
+                "com.example.app": {
+                    "enabled": None,
+                    "appops": {"RUN_ANY_IN_BACKGROUND": "allow"},
+                    "standby_bucket": None,
+                }
+            },
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses[
+            "adb -s test-device shell cmd appops set com.example.app RUN_ANY_IN_BACKGROUND allow"
+        ] = CommandResult(0, "", "")
+
+        app.recorder.restore()
+
         self.assertFalse(app.store.has_entries())
         state_file = self.test_dir / "devices" / "test-device" / "state.json"
         self.assertFalse(state_file.exists())
 
-    def test_failed_restore_keeps_state(self):
-        client = self.get_client(serial="test-device")
-        app = self.get_app(client)
+    def test_successful_restore_still_clears_state_file(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
+        self.runner.responses["adb -s test-device shell settings put global test_key old_val"] = CommandResult(0, "", "")
 
-        # Mock initial value so snapshot records it
-        self.runner.responses["adb -s test-device shell settings list global"] = CommandResult(0, "test_key=old_val", "")
+        app.recorder.restore()
 
-        # Setup state
-        app.recorder.snapshot_setting("global", "test_key")
-        app.store.save()
-        self.assertTrue(app.store.has_entries())
+        self.assertFalse(app.store.has_entries())
+        state_file = self.test_dir / "devices" / "test-device" / "state.json"
+        self.assertFalse(state_file.exists())
 
-        # Mock failure for the restore command
+    def test_failed_restore_still_keeps_state_file(self):
+        state_data = {
+            "version": 2,
+            "device": {
+                "serial": "test-device",
+                "brand": "Google",
+                "model": "Pixel 6",
+                "android_release": "13",
+                "sdk": "33",
+                "fingerprint": "fingerprint-1",
+            },
+            "settings": {
+                "global/test_key": {"namespace": "global", "key": "test_key", "value": "old_val"}
+            },
+            "device_config": {},
+            "packages": {},
+        }
+        app, _ = self.make_saved_state_app(state_data)
         self.runner.responses["adb -s test-device shell settings put global test_key old_val"] = CommandResult(1, "", "Failed")
 
         app.recorder.restore()
-        self.assertTrue(app.store.has_entries(), f"State entries should persist after failed restore. Data: {app.store.data}")
+
+        self.assertTrue(app.store.has_entries())
+        self.assertEqual(list(app.store.data["settings"].keys()), ["global/test_key"])
         state_file = self.test_dir / "devices" / "test-device" / "state.json"
         self.assertTrue(state_file.exists())
 

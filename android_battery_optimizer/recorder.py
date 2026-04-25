@@ -1,6 +1,6 @@
 import re
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, cast
 from .adb import AdbClient, CommandError
 from .state import StateStore
 from .operations import STANDBY_BUCKET_MAP
@@ -674,7 +674,11 @@ class StateRecorder:
 
         messages: List[str] = []
         had_failures = False
-        for item in self.store.data["settings"].values():
+        settings = cast(Dict[str, Dict[str, object]], self.store.data["settings"])
+        device_config = cast(Dict[str, Dict[str, object]], self.store.data["device_config"])
+        packages = cast(Dict[str, Dict[str, object]], self.store.data["packages"])
+
+        for item in list(settings.values()):
             namespace = item["namespace"]
             key = item["key"]
             value = item["value"]
@@ -687,13 +691,20 @@ class StateRecorder:
                         mutate=True,
                     )
                 messages.append(f"Restored setting {namespace}/{key}")
+                self._remove_snapshot_for_entry(
+                    {
+                        "type": "setting",
+                        "namespace": namespace,
+                        "key": key,
+                    }
+                )
             except CommandError as exc:
                 had_failures = True
                 msg = f"Failed to restore setting {namespace}/{key}: {exc}"
                 messages.append(msg)
                 self.client.output(msg)
 
-        for item in self.store.data["device_config"].values():
+        for item in list(device_config.values()):
             namespace = item["namespace"]
             key = item["key"]
             value = item["value"]
@@ -709,17 +720,32 @@ class StateRecorder:
                         mutate=True,
                     )
                 messages.append(f"Restored device_config {namespace}/{key}")
+                self._remove_snapshot_for_entry(
+                    {
+                        "type": "device_config",
+                        "namespace": namespace,
+                        "key": key,
+                    }
+                )
             except CommandError as exc:
                 had_failures = True
                 msg = f"Failed to restore device_config {namespace}/{key}: {exc}"
                 messages.append(msg)
                 self.client.output(msg)
 
-        for package, item in self.store.data["packages"].items():
-            for op, value in item["appops"].items():
+        for package, item in list(packages.items()):
+            appops = cast(Dict[str, Optional[str]], item["appops"])
+            for op, value in list(appops.items()):
                 try:
                     self._restore_appop_value(package, op, value)
                     messages.append(f"Restored {package} appop {op}")
+                    self._remove_snapshot_for_entry(
+                        {
+                            "type": "appop",
+                            "package": package,
+                            "op": op,
+                        }
+                    )
                 except CommandError as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} appop {op}: {exc}"
@@ -734,6 +760,12 @@ class StateRecorder:
                         mutate=True,
                     )
                     messages.append(f"Restored {package} standby bucket")
+                    self._remove_snapshot_for_entry(
+                        {
+                            "type": "standby_bucket",
+                            "package": package,
+                        }
+                    )
                 except CommandError as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} standby bucket: {exc}"
@@ -748,6 +780,12 @@ class StateRecorder:
                         command = ["pm", "disable-user", "--user", "0", package]
                     self.client.shell(command, mutate=True)
                     messages.append(f"Restored {package} enabled state")
+                    self._remove_snapshot_for_entry(
+                        {
+                            "type": "package_enabled",
+                            "package": package,
+                        }
+                    )
                 except CommandError as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} enabled state: {exc}"
