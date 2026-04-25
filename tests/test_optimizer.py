@@ -5,20 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
-from optimizer import (
-    AdbClient,
-    BatteryOptimizerApp,
-    BatteryOptimizerCLI,
-    CommandError,
-    CommandResult,
-    StateRecorder,
-    StateStore,
-    SnapshotError,
-    VerificationError,
-    parse_adb_devices,
-    resolve_package_choice,
-    SubprocessRunner,
-)
+from android_battery_optimizer.adb import AdbClient, CommandError, CommandResult, SubprocessRunner
+from android_battery_optimizer.app import BatteryOptimizerApp
+from android_battery_optimizer.cli import BatteryOptimizerCLI
+from android_battery_optimizer.recorder import StateRecorder, SnapshotError, VerificationError
+from android_battery_optimizer.state import StateStore
+from android_battery_optimizer.android import parse_adb_devices, resolve_package_choice
 
 
 class OptimizerTests(unittest.TestCase):
@@ -42,7 +34,7 @@ class OptimizerTests(unittest.TestCase):
         )
         return app, cli, outputs
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_state_is_scoped_by_serial(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,7 +71,7 @@ class OptimizerTests(unittest.TestCase):
                 app3.recorder.put_setting("global", "test", "3")
             self.assertTrue(state_file_3.exists())
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_dry_run_does_not_create_state_file(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,7 +85,7 @@ class OptimizerTests(unittest.TestCase):
             
             self.assertFalse((Path(tmp) / "devices").exists())
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_restore_refuses_device_mismatch(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -131,7 +123,7 @@ class OptimizerTests(unittest.TestCase):
                 if "settings" in args and "put" in args:
                     self.fail("ADB restore command run on mismatched device")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_corrupt_state_file_is_quarantined(self, mock_run):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -148,7 +140,7 @@ class OptimizerTests(unittest.TestCase):
             self.assertEqual(app.store.data["settings"], {})
             self.assertTrue(any(f.name.startswith("state.json.corrupt.") for f in serial_dir.iterdir()))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_state_save_is_atomic(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,8 +176,8 @@ class OptimizerTests(unittest.TestCase):
             ["com.example.music"],
         )
 
-    @patch("optimizer.shutil.which")
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_missing_adb_is_reported(self, mock_run, mock_which):
         mock_which.return_value = None
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,8 +185,8 @@ class OptimizerTests(unittest.TestCase):
             self.assertFalse(cli.check_environment())
             self.assertIn("ADB was not found in PATH.", outputs[0])
 
-    @patch("optimizer.shutil.which")
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_no_devices_is_reported(self, mock_run, mock_which):
         mock_which.return_value = "/usr/bin/adb"
         mock_run.return_value = MagicMock(returncode=0, stdout="List of devices attached\n\n", stderr="")
@@ -203,8 +195,8 @@ class OptimizerTests(unittest.TestCase):
             self.assertFalse(cli.check_environment())
             self.assertIn("No ADB devices detected.", outputs[0])
 
-    @patch("optimizer.shutil.which")
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_multiple_devices_requires_selection(self, mock_run, mock_which):
         mock_which.return_value = "/usr/bin/adb"
         mock_run.return_value = MagicMock(
@@ -217,8 +209,8 @@ class OptimizerTests(unittest.TestCase):
             self.assertTrue(cli.check_environment())
             self.assertEqual(cli.client.serial, "serial-2")
 
-    @patch("optimizer.shutil.which")
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_unauthorized_device_is_blocked(self, mock_run, mock_which):
         mock_which.return_value = "/usr/bin/adb"
         mock_run.return_value = MagicMock(
@@ -231,8 +223,8 @@ class OptimizerTests(unittest.TestCase):
             self.assertFalse(cli.check_environment())
             self.assertIn("No authorized online device is available.", outputs[-1])
 
-    @patch("optimizer.shutil.which")
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.shutil.which")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_experimental_confirmation_blocks_mutation(self, mock_run, mock_which):
         mock_which.return_value = "/usr/bin/adb"
         def side_effect(args, **kwargs):
@@ -258,7 +250,7 @@ class OptimizerTests(unittest.TestCase):
                 
             self.assertIn("Skipped experimental optimizations.", outputs)
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_snapshot_restore_for_unset_setting_uses_delete(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -285,7 +277,7 @@ class OptimizerTests(unittest.TestCase):
                 timeout=30
             )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_package_state_restore_covers_appops_bucket_and_enabled_state(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -325,7 +317,7 @@ class OptimizerTests(unittest.TestCase):
                 capture_output=True, text=True, input=None, timeout=30
             )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_restore_reports_failures(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -349,7 +341,7 @@ class OptimizerTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "devices" / "serial-1" / "state.json").exists())
             self.assertTrue(any("Partial state corruption" in out for out in outputs))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_validate_package_blocks_unknown_package(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="package:com.example.safe\n", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,7 +350,7 @@ class OptimizerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app.validate_package("com.bad.actor;rm -rf /")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_partial_rollback_on_batch_failure(self, mock_run):
         def side_effect(args, **kwargs):
             input_data = kwargs.get('input')
@@ -395,7 +387,7 @@ class OptimizerTests(unittest.TestCase):
                 if "other_setting" in cmd_str and "put" in cmd_str:
                     self.assertFalse("old_value" in cmd_str)
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_no_rollback_if_not_dispatched(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,7 +409,7 @@ class OptimizerTests(unittest.TestCase):
                 cmd_str = " ".join(args)
                 self.assertFalse("settings put" in cmd_str and "old_value" in cmd_str)
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_pre_dispatch_error_does_not_persist_state(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -438,7 +430,7 @@ class OptimizerTests(unittest.TestCase):
                     data = json.load(f)
                     self.assertEqual(data["settings"], {})
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_partial_batch_failure_rolls_back_successes_and_does_not_keep_reverted_entries(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -476,7 +468,7 @@ class OptimizerTests(unittest.TestCase):
                     data = json.load(f)
                     self.assertEqual(data["settings"], {})
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_partial_batch_failure_keeps_unresolved_state_if_rollback_fails(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -519,7 +511,7 @@ class OptimizerTests(unittest.TestCase):
             
             self.assertTrue(any("Partial state corruption" in out for out in outputs))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_successful_transaction_persists_state(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -543,7 +535,7 @@ class OptimizerTests(unittest.TestCase):
                 self.assertIn("global/setting0", data["settings"])
                 self.assertEqual(data["settings"]["global/setting0"]["value"], "old0")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_subprocess_runner_timeout_raises_command_error(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=["sleep", "10"], timeout=1.0, output=b"partial stdout", stderr=b"partial stderr"
@@ -556,7 +548,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(cm.exception.result.stdout, "partial stdout")
         self.assertEqual(cm.exception.result.stderr, "partial stderr")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_adb_shell_uses_default_timeout(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         runner = SubprocessRunner()
@@ -571,7 +563,7 @@ class OptimizerTests(unittest.TestCase):
             timeout=30
         )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_bg_dexopt_uses_long_timeout(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
@@ -586,7 +578,7 @@ class OptimizerTests(unittest.TestCase):
                 timeout=300
             )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_whitelisted_apps_are_not_mutated(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -645,7 +637,7 @@ class OptimizerTests(unittest.TestCase):
                         break
             self.assertTrue(mutation_found, "com.example.music was not mutated")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_unknown_package_enabled_state_blocks_mutation(self, mock_run):
         # Simulate package NOT present in enabled/disabled lists
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -668,7 +660,7 @@ class OptimizerTests(unittest.TestCase):
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_appop_snapshot_failure_blocks_mutation(self, mock_run):
         # Simulate appops command failure
         def side_effect(args, **kwargs):
@@ -696,7 +688,7 @@ class OptimizerTests(unittest.TestCase):
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_standby_bucket_snapshot_failure_blocks_mutation(self, mock_run):
         # Simulate usagestats output missing the package
         mock_run.return_value = MagicMock(returncode=0, stdout="some other output\n", stderr="")
@@ -719,7 +711,7 @@ class OptimizerTests(unittest.TestCase):
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_put_setting_verifies_readback_success(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -743,7 +735,7 @@ class OptimizerTests(unittest.TestCase):
                 capture_output=True, text=True, input=None, timeout=None
             )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_put_setting_verification_failure_rolls_back(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -767,7 +759,7 @@ class OptimizerTests(unittest.TestCase):
                 capture_output=True, text=True, input=None, timeout=30
             )
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_device_config_verification_failure_reports_error(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -785,7 +777,7 @@ class OptimizerTests(unittest.TestCase):
             with self.assertRaises(VerificationError):
                 app.recorder.put_device_config("namespace", "key", "new")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_delete_setting_verifies_absence(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -803,7 +795,7 @@ class OptimizerTests(unittest.TestCase):
             # Should not raise error because "null" is normalized to None
             app.recorder.delete_setting("global", "some_key")
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_batched_transaction_verifies_all_entries_after_success(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -838,7 +830,7 @@ class OptimizerTests(unittest.TestCase):
             )
 
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_safe_optimizations_refuse_without_device_config_support(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -853,7 +845,7 @@ class OptimizerTests(unittest.TestCase):
                 app.apply_documented_safe_optimizations()
             self.assertIn("Device does not support `device_config`", str(cm.exception))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_restrict_background_apps_refuses_without_appops_support(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -868,7 +860,7 @@ class OptimizerTests(unittest.TestCase):
                 app.restrict_background_apps()
             self.assertIn("Device does not support `appops`", str(cm.exception))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_experimental_optimizations_refuse_when_sdk_too_old(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -883,7 +875,7 @@ class OptimizerTests(unittest.TestCase):
                 app.apply_experimental_optimizations()
             self.assertIn("Device SDK 25 is too old", str(cm.exception))
 
-    @patch("optimizer.subprocess.run")
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_samsung_optimizations_still_require_samsung_brand(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -897,6 +889,11 @@ class OptimizerTests(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 app.apply_samsung_experimental_optimizations()
             self.assertIn("Connected device is not Samsung", str(cm.exception))
+
+    def test_optimizer_wrapper_exposes_main(self):
+        import optimizer
+        self.assertTrue(callable(optimizer.main))
+        self.assertTrue(callable(optimizer.AdbClient))
 
 
 if __name__ == "__main__":
