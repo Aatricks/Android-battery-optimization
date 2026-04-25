@@ -583,6 +583,55 @@ class OptimizerTests(unittest.TestCase):
                 timeout=300
             )
 
+    @patch("optimizer.subprocess.run")
+    def test_whitelisted_apps_are_not_mutated(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "pm list packages -3" in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
+            if "pm list packages" in cmd and "-3" not in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            
+            # Setup whitelist
+            app.save_whitelist(["com.example.chat"])
+            
+            # Run restriction
+            skipped = app.restrict_background_apps(level="ignore")
+            
+            # Assert com.example.chat appears in returned skipped list
+            self.assertIn("com.example.chat", skipped)
+            
+            # Check all calls for mutations of com.example.chat
+            for call in mock_run.call_args_list:
+                # Check command line args
+                args = call[0][0]
+                cmd_str = " ".join(args)
+                if "com.example.chat" in cmd_str:
+                    if "appops" in cmd_str or "set-standby-bucket" in cmd_str:
+                        self.fail(f"Whitelisted app com.example.chat was mutated in command line: {cmd_str}")
+                
+                # Check input_data (since it's batched)
+                input_data = call[1].get('input', '')
+                if input_data and "com.example.chat" in input_data:
+                    if "appops" in input_data or "set-standby-bucket" in input_data:
+                        self.fail(f"Whitelisted app com.example.chat was mutated in batched input: {input_data}")
+
+            # Assert com.example.music is mutated
+            mutation_found = False
+            for call in mock_run.call_args_list:
+                input_data = call[1].get('input', '')
+                if input_data and "com.example.music" in input_data:
+                    if "appops" in input_data and "RUN_ANY_IN_BACKGROUND" in input_data:
+                        mutation_found = True
+                        break
+            self.assertTrue(mutation_found, "com.example.music was not mutated")
+
 
 if __name__ == "__main__":
     unittest.main()

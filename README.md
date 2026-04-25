@@ -93,11 +93,9 @@ Files written there:
 
 ## Whitelist Behavior
 
-If you use `Restrict 3rd Party Apps`, apps in the whitelist are forced back toward a less restrictive state:
-- `RUN_ANY_IN_BACKGROUND` is set to `allow`
-- standby bucket is set to `active`
+If you use `Restrict 3rd Party Apps`, apps in the whitelist are skipped and their state is not modified by the tool.
 
-Use the whitelist for apps where you care about real-time background behavior, such as:
+Use the whitelist for apps where you want to maintain their current background behavior, such as:
 - messaging apps
 - email apps
 - music or podcast apps

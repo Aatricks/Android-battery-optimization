@@ -1001,8 +1001,6 @@ class BatteryOptimizerApp:
                     continue
                 if package in whitelist:
                     skipped.append(package)
-                    self.recorder.set_appop(package, "RUN_ANY_IN_BACKGROUND", "allow")
-                    self.recorder.set_standby_bucket(package, "active")
                     continue
                 self.recorder.set_appop(package, "RUN_ANY_IN_BACKGROUND", level)
                 bucket = "rare" if level == "ignore" else "active"
