@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 import re
@@ -190,14 +191,25 @@ class StateStore:
 
     @contextmanager
     def transaction(self):
+        if getattr(self, "_in_transaction", False):
+            yield
+            return
+
+        backup = copy.deepcopy(self.data)
         self._in_transaction = True
         self._pending_save = False
+        success = False
         try:
             yield
+            success = True
         finally:
             self._in_transaction = False
-            if self._pending_save:
-                self.save()
+            if success:
+                if self._pending_save:
+                    self.save()
+            else:
+                self.data = backup
+                self._pending_save = False
 
     def save(self) -> None:
         if self.client.dry_run:
@@ -312,13 +324,14 @@ class StateRecorder:
         failures = []
         entries_to_revert = []
         if successful_indices is not None:
-            for idx in successful_indices:
+            # Revert in reverse order of indices to be safe
+            for idx in sorted(successful_indices, reverse=True):
                 if idx < len(self._ledger):
                     entries_to_revert.append(self._ledger[idx])
         else:
-            entries_to_revert = list(self._ledger)
+            entries_to_revert = list(reversed(self._ledger))
 
-        for entry in reversed(entries_to_revert):
+        for entry in entries_to_revert:
             type_ = entry["type"]
             try:
                 if type_ == "setting":
@@ -361,9 +374,48 @@ class StateRecorder:
                 msg = f"Rollback failed for {type_} {entry}: {exc}"
                 failures.append(msg)
                 self.client.output(msg)
+                self._persist_failed_rollback(entry)
                 
         if failures:
             self.client.output("Warning: Partial state corruption due to rollback failures.")
+            self.store.save()
+
+    def _persist_failed_rollback(self, entry: Dict[str, object]) -> None:
+        type_ = entry["type"]
+        if type_ == "setting":
+            store = self.store.data["settings"]
+            snapshot_key = f"{entry['namespace']}/{entry['key']}"
+            if snapshot_key not in store:
+                store[snapshot_key] = {
+                    "namespace": entry["namespace"],
+                    "key": entry["key"],
+                    "value": entry["prior_value"],
+                }
+        elif type_ == "device_config":
+            store = self.store.data["device_config"]
+            snapshot_key = f"{entry['namespace']}/{entry['key']}"
+            if snapshot_key not in store:
+                store[snapshot_key] = {
+                    "namespace": entry["namespace"],
+                    "key": entry["key"],
+                    "value": entry["prior_value"],
+                }
+        elif type_ == "appop":
+            package = str(entry["package"])
+            op = str(entry["op"])
+            pkg_entry = self._package_entry(package)
+            if op not in pkg_entry["appops"]:
+                pkg_entry["appops"][op] = entry["prior_value"]
+        elif type_ == "standby_bucket":
+            package = str(entry["package"])
+            pkg_entry = self._package_entry(package)
+            if pkg_entry["standby_bucket"] is None:
+                pkg_entry["standby_bucket"] = entry["prior_value"]
+        elif type_ == "package_enabled":
+            package = str(entry["package"])
+            pkg_entry = self._package_entry(package)
+            if pkg_entry["enabled"] is None:
+                pkg_entry["enabled"] = entry["prior_value"]
 
     def prefetch_package_states(self) -> None:
         try:

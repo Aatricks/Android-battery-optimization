@@ -412,6 +412,132 @@ class OptimizerTests(unittest.TestCase):
                 cmd_str = " ".join(args)
                 self.assertFalse("settings put" in cmd_str and "old_value" in cmd_str)
 
+    @patch("optimizer.subprocess.run")
+    def test_pre_dispatch_error_does_not_persist_state(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.rebind_device()
+
+            try:
+                with app.recorder.transaction():
+                    app.recorder.put_setting("global", "test_setting", "new_val")
+                    raise RuntimeError("Fail before dispatch")
+            except RuntimeError:
+                pass
+
+            state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
+            if state_file.exists():
+                with state_file.open() as f:
+                    data = json.load(f)
+                    self.assertEqual(data["settings"], {})
+
+    @patch("optimizer.subprocess.run")
+    def test_partial_batch_failure_rolls_back_successes_and_does_not_keep_reverted_entries(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="setting0=old0\nsetting1=old1\n", stderr="")
+            input_data = kwargs.get('input')
+            if input_data and "SUCCESS_0" in input_data:
+                # Command 0 success, Command 1 fail
+                return MagicMock(returncode=1, stdout="SUCCESS_0\n", stderr="fail")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.rebind_device()
+
+            try:
+                with app.recorder.transaction():
+                    app.recorder.put_setting("global", "setting0", "new0")
+                    app.recorder.put_setting("global", "setting1", "new1")
+            except CommandError:
+                pass
+
+            # setting0 should be rolled back to old0
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
+                capture_output=True, text=True, input=None
+            )
+            
+            # state file should be clean (setting0 was reverted, setting1 never ran successfully)
+            state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
+            if state_file.exists():
+                with state_file.open() as f:
+                    data = json.load(f)
+                    self.assertEqual(data["settings"], {})
+
+    @patch("optimizer.subprocess.run")
+    def test_partial_batch_failure_keeps_unresolved_state_if_rollback_fails(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="setting0=old0\n", stderr="")
+            input_data = kwargs.get('input')
+            if input_data and "SUCCESS_0" in input_data:
+                return MagicMock(returncode=1, stdout="SUCCESS_0\n", stderr="fail")
+            if "settings put global setting0 old0" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="rollback failed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, outputs = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.rebind_device()
+
+            try:
+                with app.recorder.transaction():
+                    app.recorder.put_setting("global", "setting0", "new0")
+                    app.recorder.put_setting("global", "setting1", "new1")
+            except CommandError:
+                pass
+
+            # Rollback was attempted
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
+                capture_output=True, text=True, input=None
+            )
+            
+            # Since rollback failed, state.json should contain setting0 but NOT setting1
+            state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
+            self.assertTrue(state_file.exists())
+            with state_file.open() as f:
+                data = json.load(f)
+                self.assertIn("global/setting0", data["settings"])
+                self.assertEqual(data["settings"]["global/setting0"]["value"], "old0")
+                self.assertNotIn("global/setting1", data["settings"])
+            
+            self.assertTrue(any("Partial state corruption" in out for out in outputs))
+
+    @patch("optimizer.subprocess.run")
+    def test_successful_transaction_persists_state(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="setting0=old0\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.rebind_device()
+
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "setting0", "new0")
+
+            state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
+            self.assertTrue(state_file.exists())
+            with state_file.open() as f:
+                data = json.load(f)
+                self.assertIn("global/setting0", data["settings"])
+                self.assertEqual(data["settings"]["global/setting0"]["value"], "old0")
+
 
 if __name__ == "__main__":
     unittest.main()
