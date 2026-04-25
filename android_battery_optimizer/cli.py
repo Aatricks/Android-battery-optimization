@@ -357,6 +357,22 @@ class BatteryOptimizerCLI:
                     self.output("Restore finished.")
                 return 0
 
+            elif args.command == "doctor-state":
+                self.output("Checking saved state for non-restorable standby bucket entries...")
+                count = 0
+                packages = self.app.store.data.get("packages", {})
+                from .operations import is_restorable_bucket
+                for package, item in packages.items():
+                    bucket = item.get("standby_bucket")
+                    if bucket is not None and not is_restorable_bucket(bucket):
+                        self.output(f"  Package {package} has non-restorable prior standby bucket: {bucket}")
+                        count += 1
+                if count == 0:
+                    self.output("No non-restorable entries found.")
+                else:
+                    self.output(f"Found {count} non-restorable entries. Manual intervention may be required upon restore.")
+                return 0
+
             elif args.command == "whitelist":
                 whitelist = self.app.load_whitelist()
                 if args.wl_command == "list":

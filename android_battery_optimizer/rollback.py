@@ -182,6 +182,14 @@ def restore_state(
         bucket = cast(Optional[str], item.get("standby_bucket"))
         if bucket is not None:
             try:
+                from .operations import is_restorable_bucket
+                if not is_restorable_bucket(bucket):
+                    msg = f"Saved standby bucket {bucket} is not writable on this device; cannot restore automatically.\nManual fallback: adb shell am set-standby-bucket {package} active"
+                    client.output(msg)
+                    messages.append(msg)
+                    had_failures = True
+                    continue
+
                 restore_and_verify(
                     lambda: client.shell(
                         ["am", "set-standby-bucket", package, bucket],

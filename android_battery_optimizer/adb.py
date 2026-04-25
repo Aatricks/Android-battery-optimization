@@ -145,8 +145,37 @@ class AdbClient:
 
     def supports_appops(self) -> bool:
         try:
-            result = self.shell(["cmd", "appops", "help"], check=False)
-            return result.returncode == 0
+            # Some Android/Samsung builds do not support `cmd appops help`,
+            # but still support the actual get/set appops commands.
+            result = self.shell(["cmd", "appops", "get", "android"], check=False)
+            output = (result.stdout + result.stderr).lower()
+
+            if result.returncode == 0:
+                return True
+
+            # These mean the appops service/command exists, even if the probe package/op
+            # produced no useful data.
+            known_appops_responses = (
+                "no operations",
+                "unknown package",
+                "bad package",
+                "usage:",
+                "appops",
+            )
+            if any(token in output for token in known_appops_responses):
+                return True
+
+            # These suggest the command/service really is unavailable.
+            unavailable_responses = (
+                "unknown command",
+                "not found",
+                "can't find service",
+                "cmd: failure calling service appops",
+            )
+            if any(token in output for token in unavailable_responses):
+                return False
+
+            return False
         except Exception:
             return False
 

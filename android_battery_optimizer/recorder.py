@@ -1,10 +1,10 @@
 import re
 from contextlib import contextmanager
-from typing import Callable, Dict, List, Optional, Sequence, cast
+from typing import Callable, Dict, List, Optional, Sequence, cast, Set
 
 from .adb import AdbClient, CommandError
 from .state import StateStore
-from .operations import STANDBY_BUCKET_MAP
+from .operations import STANDBY_BUCKET_MAP, normalize_restorable_bucket
 
 from .ledger import AnyLedgerEntry
 from .snapshot import (
@@ -25,6 +25,11 @@ from .verification import (
 from .rollback import perform_rollback, restore_appop_value, restore_state
 
 PACKAGE_USER_ID = "0"
+
+class PartialBatchError(RuntimeError):
+    def __init__(self, failed_packages: Set[str]) -> None:
+        self.failed_packages = failed_packages
+        super().__init__(f"Batch transaction had partial package failures: {failed_packages}")
 
 class StateRecorder:
     def __init__(self, client: AdbClient, store: StateStore) -> None:
@@ -414,6 +419,12 @@ class StateRecorder:
                 raise
 
     def set_standby_bucket(self, package: str, bucket: str, verify: bool = True) -> None:
+        prior_bucket = self._get_standby_bucket(package)
+        try:
+            normalize_restorable_bucket(prior_bucket)
+        except ValueError as exc:
+            raise SnapshotError(f"Prior standby bucket {prior_bucket} is not restorable: {exc}") from exc
+
         self.snapshot_standby_bucket(package, new_value=bucket)
         self._queue_or_run(["am", "set-standby-bucket", package, bucket])
         if not self._in_transaction and self.verify and verify:

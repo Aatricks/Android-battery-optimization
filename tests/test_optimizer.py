@@ -1328,7 +1328,7 @@ class OptimizerTests(unittest.TestCase):
     def test_restrict_background_apps_refuses_without_appops_support(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
-            if "cmd appops help" in cmd:
+            if "appops" in cmd:
                 return MagicMock(returncode=1, stdout="", stderr="not found")
             return MagicMock(returncode=0, stdout="30\n", stderr="") # sdk 30
         mock_run.side_effect = side_effect

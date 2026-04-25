@@ -329,57 +329,76 @@ class BatteryOptimizerApp:
                 raise ValueError("Diagnostic report yielded no packages but third-party packages exist.")
                 
         import time
+        from .operations import normalize_restorable_bucket
+        from .recorder import PartialBatchError, SnapshotError
         current_time_ms = time.time() * 1000
         
-        with self.recorder.transaction():
-            self.recorder.prefetch_package_states()
-            for pkg_info in report["packages"]:
-                pkg = pkg_info["package"]
-                if pkg in whitelist:
-                    skipped.append({"package": pkg, "reason": "whitelisted"})
-                    continue
-                if pkg in critical:
-                    skipped.append({"package": pkg, "reason": "critical"})
-                    continue
-                    
-                if min_last_used_days is not None:
-                    last_used = pkg_info.get("signals", {}).get("last_used", {})
-                    if last_used.get("parsed"):
-                        last_used_ms = float(last_used["epoch_ms"])
-                        if (current_time_ms - last_used_ms) < (min_last_used_days * 86400 * 1000):
-                            skipped.append({"package": pkg, "reason": "recently_used"})
-                            continue
-                    else:
-                        skipped.append({"package": pkg, "reason": "last_used_unknown"})
+        try:
+            with self.recorder.transaction():
+                self.recorder.prefetch_package_states()
+                for pkg_info in report["packages"]:
+                    pkg = pkg_info["package"]
+                    if pkg in whitelist:
+                        skipped.append({"package": pkg, "reason": "whitelisted"})
                         continue
-                
-                rec = pkg_info["recommendation"]
-                reason = pkg_info.get("reason", "")
-                
-                if rec == "keep":
-                    kept.append({"package": pkg, "reason": reason})
-                    continue
-                
-                if aggressive and rec == "aggressive_restrict":
-                    self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
-                    self.recorder.set_standby_bucket(pkg, "restricted")
-                    applied.append({
-                        "package": pkg,
-                        "appop": "ignore",
-                        "bucket": "restricted",
-                        "reason": reason
-                    })
-                elif not aggressive and rec in ("restrict", "aggressive_restrict"):
-                    self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
-                    self.recorder.set_standby_bucket(pkg, "rare")
-                    applied.append({
-                        "package": pkg,
-                        "appop": "ignore",
-                        "bucket": "rare",
-                        "reason": reason
-                    })
+                    if pkg in critical:
+                        skipped.append({"package": pkg, "reason": "critical"})
+                        continue
+                        
+                    if min_last_used_days is not None:
+                        last_used = pkg_info.get("signals", {}).get("last_used", {})
+                        if last_used.get("parsed"):
+                            last_used_ms = float(last_used["epoch_ms"])
+                            if (current_time_ms - last_used_ms) < (min_last_used_days * 86400 * 1000):
+                                skipped.append({"package": pkg, "reason": "recently_used"})
+                                continue
+                        else:
+                            skipped.append({"package": pkg, "reason": "last_used_unknown"})
+                            continue
+                    
+                    rec = pkg_info["recommendation"]
+                    reason = pkg_info.get("reason", "")
+                    
+                    if rec == "keep":
+                        kept.append({"package": pkg, "reason": reason})
+                        continue
+                    
+                    try:
+                        prior_bucket = self.recorder._get_standby_bucket(pkg)
+                        normalize_restorable_bucket(prior_bucket)
+                    except (SnapshotError, ValueError):
+                        skipped.append({"package": pkg, "reason": "non_restorable_standby_bucket"})
+                        continue
+
+                    if aggressive and rec == "aggressive_restrict":
+                        self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
+                        self.recorder.set_standby_bucket(pkg, "restricted")
+                        applied.append({
+                            "package": pkg,
+                            "appop": "ignore",
+                            "bucket": "restricted",
+                            "reason": reason
+                        })
+                    elif not aggressive and rec in ("restrict", "aggressive_restrict"):
+                        self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
+                        self.recorder.set_standby_bucket(pkg, "rare")
+                        applied.append({
+                            "package": pkg,
+                            "appop": "ignore",
+                            "bucket": "rare",
+                            "reason": reason
+                        })
+                    else:
+                        skipped.append({"package": pkg, "reason": "unsupported_recommendation"})
+        except PartialBatchError as exc:
+            failed = exc.failed_packages
+            new_applied = []
+            for item in applied:
+                if item["package"] in failed:
+                    skipped.append({"package": item["package"], "reason": "standby_bucket_not_controllable"})
                 else:
-                    skipped.append({"package": pkg, "reason": "unsupported_recommendation"})
+                    new_applied.append(item)
+            applied = new_applied
                     
         return {
             "applied": applied,
