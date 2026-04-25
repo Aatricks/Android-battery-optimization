@@ -55,7 +55,23 @@ The Samsung path is deliberately narrower than older versions of this repo. Undo
 - An authorized ADB connection
 - Python 3
 
+## Installation
+
+You can install the tool as a package:
+
+```bash
+python3 -m pip install -e .
+```
+
+After installation, the `android-battery-optimizer` command will be available:
+
+```bash
+android-battery-optimizer --help
+```
+
 ## Usage
+
+Direct script:
 
 ```bash
 python3 optimizer.py
@@ -67,12 +83,26 @@ Linux wrapper:
 ./optimize.sh
 ```
 
+Package entry point:
+
+```bash
+android-battery-optimizer
+```
+
 Optional flags:
 
 ```bash
-python3 optimizer.py --serial SERIAL
-python3 optimizer.py --dry-run
-python3 optimizer.py --state-dir /path/to/state
+android-battery-optimizer --serial SERIAL
+android-battery-optimizer --dry-run
+android-battery-optimizer --state-dir /path/to/state
+```
+
+## Development
+
+Run tests:
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 ## Data Location
