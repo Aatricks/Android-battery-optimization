@@ -14,6 +14,7 @@ from optimizer import (
     StateRecorder,
     StateStore,
     SnapshotError,
+    VerificationError,
     parse_adb_devices,
     resolve_package_choice,
     SubprocessRunner,
@@ -21,7 +22,7 @@ from optimizer import (
 
 
 class OptimizerTests(unittest.TestCase):
-    def make_app_and_cli(self, state_dir, user_inputs=None):
+    def make_app_and_cli(self, state_dir, user_inputs=None, verify=False):
         outputs = []
         input_values = list(user_inputs or [])
 
@@ -33,6 +34,7 @@ class OptimizerTests(unittest.TestCase):
         runner = SubprocessRunner()
         client = AdbClient(runner=runner, output=outputs.append)
         app = BatteryOptimizerApp(client=client, state_dir=state_dir)
+        app.recorder.verify = verify
         cli = BatteryOptimizerCLI(
             app=app,
             output=outputs.append,
@@ -710,6 +712,124 @@ class OptimizerTests(unittest.TestCase):
 
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
+
+    @patch("optimizer.subprocess.run")
+    def test_put_setting_verifies_readback_success(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="some_key=old_val\n", stderr="")
+            if "settings get global some_key" in cmd:
+                return MagicMock(returncode=0, stdout="new_val\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp), verify=True)
+            app.client.serial = "serial-1"
+
+            # Should not raise any error
+            app.recorder.put_setting("global", "some_key", "new_val")
+
+            # Verify readback was called
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "some_key"],
+                capture_output=True, text=True, input=None, timeout=None
+            )
+
+    @patch("optimizer.subprocess.run")
+    def test_put_setting_verification_failure_rolls_back(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="some_key=old_val\n", stderr="")
+            if "settings get global some_key" in cmd:
+                return MagicMock(returncode=0, stdout="old_val\n", stderr="") # Still old
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp), verify=True)
+            app.client.serial = "serial-1"
+
+            with self.assertRaises(VerificationError):
+                app.recorder.put_setting("global", "some_key", "new_val")
+
+            # Verify rollback was attempted
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "some_key", "old_val"],
+                capture_output=True, text=True, input=None, timeout=30
+            )
+
+    @patch("optimizer.subprocess.run")
+    def test_device_config_verification_failure_reports_error(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "device_config list namespace" in cmd:
+                return MagicMock(returncode=0, stdout="key=old\n", stderr="")
+            if "device_config get namespace key" in cmd:
+                return MagicMock(returncode=0, stdout="old\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp), verify=True)
+            app.client.serial = "serial-1"
+
+            with self.assertRaises(VerificationError):
+                app.recorder.put_device_config("namespace", "key", "new")
+
+    @patch("optimizer.subprocess.run")
+    def test_delete_setting_verifies_absence(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="some_key=val\n", stderr="")
+            if "settings get global some_key" in cmd:
+                return MagicMock(returncode=0, stdout="null\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp), verify=True)
+            app.client.serial = "serial-1"
+
+            # Should not raise error because "null" is normalized to None
+            app.recorder.delete_setting("global", "some_key")
+
+    @patch("optimizer.subprocess.run")
+    def test_batched_transaction_verifies_all_entries_after_success(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "settings list global" in cmd:
+                return MagicMock(returncode=0, stdout="s1=old1\ns2=old2\n", stderr="")
+            if "settings get global s1" in cmd:
+                return MagicMock(returncode=0, stdout="v1\n", stderr="")
+            if "settings get global s2" in cmd:
+                return MagicMock(returncode=0, stdout="v2\n", stderr="")
+            input_data = kwargs.get('input')
+            if input_data and "SUCCESS_0" in input_data:
+                return MagicMock(returncode=0, stdout="SUCCESS_0\nSUCCESS_1\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp), verify=True)
+            app.client.serial = "serial-1"
+
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "s1", "v1")
+                app.recorder.put_setting("global", "s2", "v2")
+
+            # Verify both were read back
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "s1"],
+                capture_output=True, text=True, input=None, timeout=None
+            )
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "s2"],
+                capture_output=True, text=True, input=None, timeout=None
+            )
 
 
 if __name__ == "__main__":

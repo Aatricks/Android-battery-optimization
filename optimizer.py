@@ -31,6 +31,20 @@ class SnapshotError(RuntimeError):
     pass
 
 
+class VerificationError(RuntimeError):
+    pass
+
+
+STANDBY_BUCKET_MAP = {
+    "active": "10",
+    "working_set": "20",
+    "frequent": "30",
+    "rare": "40",
+    "restricted": "45",
+    "never": "50",
+}
+
+
 @dataclass
 class CommandResult:
     returncode: int
@@ -323,6 +337,7 @@ class StateRecorder:
     def __init__(self, client: AdbClient, store: StateStore) -> None:
         self.client = client
         self.store = store
+        self.verify = True
         self._in_transaction = False
         self._batched_commands: List[str] = []
         self._settings_cache: Dict[str, Dict[str, str]] = {}
@@ -370,13 +385,24 @@ class StateRecorder:
                     script = "\n".join(script_lines)
                     batch_dispatched = True
                     self.client.shell([], mutate=True, input_data=script)
+                    # Verify all entries after batch success
+                    if self.verify:
+                        for entry in self._ledger:
+                            self._verify_entry(entry)
         except Exception as exc:
             if batch_dispatched:
                 stdout = getattr(getattr(exc, "result", None), "stdout", "")
                 successful_indices = [
                     int(m.group(1)) for m in re.finditer(r"SUCCESS_(\d+)", stdout)
                 ]
-                self._revert_ledger(successful_indices)
+                # If VerificationError, we want to revert ALL commands that were sent in the batch
+                # because we don't know for sure which one failed and we want to keep it atomic.
+                # SUCCESS_i indicates it was successfully executed, so it should be reverted.
+                if isinstance(exc, VerificationError):
+                    # For verification error, all successfully dispatched commands should be rolled back.
+                    self._revert_ledger(successful_indices)
+                else:
+                    self._revert_ledger(successful_indices)
             raise
         finally:
             self._in_transaction = False
@@ -549,7 +575,7 @@ class StateRecorder:
                 self._settings_cache[namespace] = {}
         return self._settings_cache[namespace].get(key)
 
-    def snapshot_setting(self, namespace: str, key: str) -> None:
+    def snapshot_setting(self, namespace: str, key: str, new_value: Optional[str] = None) -> None:
         store = self.store.data["settings"]
         snapshot_key = f"{namespace}/{key}"
         value = self._get_setting(namespace, key)
@@ -566,15 +592,28 @@ class StateRecorder:
             "namespace": namespace,
             "key": key,
             "prior_value": value,
+            "new_value": self._normalize_value(new_value),
         })
 
-    def put_setting(self, namespace: str, key: str, value: object) -> None:
-        self.snapshot_setting(namespace, key)
+    def put_setting(self, namespace: str, key: str, value: object, verify: bool = True) -> None:
+        self.snapshot_setting(namespace, key, new_value=str(value))
         self._queue_or_run(["settings", "put", namespace, key, value])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_setting(namespace, key, str(value))
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
-    def delete_setting(self, namespace: str, key: str) -> None:
-        self.snapshot_setting(namespace, key)
+    def delete_setting(self, namespace: str, key: str, verify: bool = True) -> None:
+        self.snapshot_setting(namespace, key, new_value=None)
         self._queue_or_run(["settings", "delete", namespace, key])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_setting(namespace, key, None)
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
     def _get_device_config(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._device_config_cache:
@@ -590,7 +629,7 @@ class StateRecorder:
                 self._device_config_cache[namespace] = {}
         return self._device_config_cache[namespace].get(key)
 
-    def snapshot_device_config(self, namespace: str, key: str) -> None:
+    def snapshot_device_config(self, namespace: str, key: str, new_value: Optional[str] = None) -> None:
         store = self.store.data["device_config"]
         snapshot_key = f"{namespace}/{key}"
         value = self._get_device_config(namespace, key)
@@ -607,15 +646,28 @@ class StateRecorder:
             "namespace": namespace,
             "key": key,
             "prior_value": value,
+            "new_value": self._normalize_value(new_value),
         })
 
-    def put_device_config(self, namespace: str, key: str, value: object) -> None:
-        self.snapshot_device_config(namespace, key)
+    def put_device_config(self, namespace: str, key: str, value: object, verify: bool = True) -> None:
+        self.snapshot_device_config(namespace, key, new_value=str(value))
         self._queue_or_run(["device_config", "put", namespace, key, value])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_device_config(namespace, key, str(value))
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
-    def delete_device_config(self, namespace: str, key: str) -> None:
-        self.snapshot_device_config(namespace, key)
+    def delete_device_config(self, namespace: str, key: str, verify: bool = True) -> None:
+        self.snapshot_device_config(namespace, key, new_value=None)
         self._queue_or_run(["device_config", "delete", namespace, key])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_device_config(namespace, key, None)
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
     def _package_entry(self, package: str) -> Dict[str, object]:
         packages = self.store.data["packages"]
@@ -633,7 +685,7 @@ class StateRecorder:
             raise SnapshotError(f"Could not determine enabled state for package: {package}")
         return self._package_enabled_cache[package]
 
-    def snapshot_package_enabled(self, package: str) -> None:
+    def snapshot_package_enabled(self, package: str, new_value: Optional[bool] = None) -> None:
         entry = self._package_entry(package)
         value = self._get_package_enabled(package)
         if entry["enabled"] is None:
@@ -643,6 +695,7 @@ class StateRecorder:
             "type": "package_enabled",
             "package": package,
             "prior_value": value,
+            "new_value": new_value,
         })
 
     def _get_appop(self, package: str, op: str) -> str:
@@ -652,7 +705,7 @@ class StateRecorder:
              raise SnapshotError(f"Could not determine appops for package: {package}")
         return self._appops_cache[package].get(op, "default")
 
-    def snapshot_appop(self, package: str, op: str) -> None:
+    def snapshot_appop(self, package: str, op: str, new_value: Optional[str] = None) -> None:
         entry = self._package_entry(package)
         value = self._get_appop(package, op)
         if op not in entry["appops"]:
@@ -663,6 +716,7 @@ class StateRecorder:
             "package": package,
             "op": op,
             "prior_value": value,
+            "new_value": new_value,
         })
 
     def _get_standby_bucket(self, package: str) -> str:
@@ -670,7 +724,7 @@ class StateRecorder:
             raise SnapshotError(f"Could not determine standby bucket for package: {package}")
         return self._standby_bucket_cache[package]
 
-    def snapshot_standby_bucket(self, package: str) -> None:
+    def snapshot_standby_bucket(self, package: str, new_value: Optional[str] = None) -> None:
         entry = self._package_entry(package)
         value = self._get_standby_bucket(package)
         if entry["standby_bucket"] is None:
@@ -680,22 +734,129 @@ class StateRecorder:
             "type": "standby_bucket",
             "package": package,
             "prior_value": value,
+            "new_value": new_value,
         })
 
-    def set_package_enabled(self, package: str, enabled: bool) -> None:
-        self.snapshot_package_enabled(package)
+    def set_package_enabled(self, package: str, enabled: bool, verify: bool = True) -> None:
+        self.snapshot_package_enabled(package, new_value=enabled)
         command = ["pm", "enable", "--user", "0", package]
         if not enabled:
             command = ["pm", "disable-user", "--user", "0", package]
         self._queue_or_run(command)
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_package_enabled(package, enabled)
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
-    def set_appop(self, package: str, op: str, value: str) -> None:
-        self.snapshot_appop(package, op)
+    def set_appop(self, package: str, op: str, value: str, verify: bool = True) -> None:
+        self.snapshot_appop(package, op, new_value=value)
         self._queue_or_run(["cmd", "appops", "set", package, op, value])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_appop(package, op, value)
+            except VerificationError:
+                self._revert_ledger()
+                raise
 
-    def set_standby_bucket(self, package: str, bucket: str) -> None:
-        self.snapshot_standby_bucket(package)
+    def set_standby_bucket(self, package: str, bucket: str, verify: bool = True) -> None:
+        self.snapshot_standby_bucket(package, new_value=bucket)
         self._queue_or_run(["am", "set-standby-bucket", package, bucket])
+        if not self._in_transaction and self.verify and verify:
+            try:
+                self.verify_standby_bucket(package, bucket)
+            except VerificationError:
+                self._revert_ledger()
+                raise
+
+    def verify_setting(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
+        if self.client.dry_run:
+            return
+        actual = self.client.shell_text(["settings", "get", namespace, key], check=False)
+        actual = self._normalize_value(actual)
+        expected = self._normalize_value(expected_value)
+        if actual != expected:
+            raise VerificationError(
+                f"Verification failed for setting {namespace}/{key}: "
+                f"expected {expected}, got {actual}"
+            )
+
+    def verify_device_config(self, namespace: str, key: str, expected_value: Optional[str]) -> None:
+        if self.client.dry_run:
+            return
+        actual = self.client.shell_text(["device_config", "get", namespace, key], check=False)
+        actual = self._normalize_value(actual)
+        expected = self._normalize_value(expected_value)
+        if actual != expected:
+            raise VerificationError(
+                f"Verification failed for device_config {namespace}/{key}: "
+                f"expected {expected}, got {actual}"
+            )
+
+    def verify_appop(self, package: str, op: str, expected_value: str) -> None:
+        if self.client.dry_run:
+            return
+        output = self.client.shell_text(["cmd", "appops", "get", package, op], check=False)
+        match = re.search(r"mode[:=]\s*(\w+)", output)
+        actual = match.group(1) if match else "default"
+        if actual != expected_value:
+            raise VerificationError(
+                f"Verification failed for appop {op} for package {package}: "
+                f"expected {expected_value}, got {actual}"
+            )
+
+    def verify_standby_bucket(self, package: str, expected_bucket: str) -> None:
+        if self.client.dry_run:
+            return
+        actual = self.client.shell_text(["am", "get-standby-bucket", package], check=False).strip()
+        expected_code = STANDBY_BUCKET_MAP.get(expected_bucket.lower(), expected_bucket)
+        if actual != expected_code:
+            raise VerificationError(
+                f"Verification failed for standby bucket for package {package}: "
+                f"expected {expected_bucket} ({expected_code}), got {actual}"
+            )
+
+    def verify_package_enabled(self, package: str, expected_enabled: bool) -> None:
+        if self.client.dry_run:
+            return
+        output = self.client.shell_text(
+            ["pm", "list", "packages", "-e" if expected_enabled else "-d", package],
+            check=False,
+        )
+        found = False
+        for line in output.splitlines():
+            if line.strip() == f"package:{package}":
+                found = True
+                break
+        if not found:
+            actual = "enabled" if not expected_enabled else "disabled/missing"
+            raise VerificationError(
+                f"Verification failed for package {package} enabled state: "
+                f"expected {expected_enabled}, but package is {actual}"
+            )
+
+    def _verify_entry(self, entry: Dict[str, object]) -> None:
+        type_ = entry["type"]
+        new_value = entry.get("new_value")
+        if type_ == "setting":
+            self.verify_setting(
+                str(entry["namespace"]),
+                str(entry["key"]),
+                str(new_value) if new_value is not None else None,
+            )
+        elif type_ == "device_config":
+            self.verify_device_config(
+                str(entry["namespace"]),
+                str(entry["key"]),
+                str(new_value) if new_value is not None else None,
+            )
+        elif type_ == "appop":
+            self.verify_appop(str(entry["package"]), str(entry["op"]), str(new_value))
+        elif type_ == "standby_bucket":
+            self.verify_standby_bucket(str(entry["package"]), str(new_value))
+        elif type_ == "package_enabled":
+            self.verify_package_enabled(str(entry["package"]), bool(new_value))
 
     def restore(self) -> List[str]:
         # Refuse restore on device mismatch
@@ -876,6 +1037,7 @@ class BatteryOptimizerApp:
         with self.whitelist_path.open("w", encoding="utf-8") as handle:
             for package in packages:
                 handle.write(f"{package}\n")
+
 
     def get_device_info(self) -> str:
         brand = self.client.shell_text(["getprop", "ro.product.brand"], check=False)
@@ -1269,7 +1431,7 @@ class BatteryOptimizerCLI:
                     return 0
                 else:
                     self.output("Invalid selection.")
-            except (CommandError, ValueError, SnapshotError) as exc:
+            except (CommandError, ValueError, SnapshotError, VerificationError) as exc:
                 self.output(f"Error: {exc}")
 
 
