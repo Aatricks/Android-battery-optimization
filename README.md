@@ -49,6 +49,27 @@ After installation, the `android-battery-optimizer` command will be available:
 android-battery-optimizer --help
 ```
 
+## Development
+
+Install the local package with developer tools:
+
+```bash
+python3 -m pip install -e ".[dev]"
+```
+
+Run the test suite without writing bytecode files:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -v
+```
+
+Run the linters and type checker:
+
+```bash
+ruff check .
+mypy android_battery_optimizer
+```
+
 ## Usage
 
 ### Interactive Menu

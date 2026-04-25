@@ -11,7 +11,7 @@ from android_battery_optimizer.recorder import StateRecorder
 class TestTimeoutCoverage(unittest.TestCase):
     def setUp(self):
         self.runner = MagicMock()
-        self.client = AdbClient(self.runner)
+        self.client = AdbClient(self.runner, output=lambda _: None)
 
     def test_non_mutating_adb_shell_uses_default_timeout(self):
         self.runner.run.return_value = CommandResult(0, "", "")

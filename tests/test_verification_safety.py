@@ -12,7 +12,7 @@ class TestVerificationSafety(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp_dir.name)
         self.mock_runner = MagicMock()
-        self.client = AdbClient(runner=self.mock_runner)
+        self.client = AdbClient(runner=self.mock_runner, output=lambda _: None)
         self.client.serial = "test-device"
         self.store = StateStore(self.state_dir, self.client)
         self.recorder = StateRecorder(self.client, self.store)

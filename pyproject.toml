@@ -19,6 +19,13 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pytest>=8",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/Aatricks/Android-battery-optimization"
 

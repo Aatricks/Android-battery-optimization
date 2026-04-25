@@ -24,7 +24,10 @@ class TestCLICommands(unittest.TestCase):
         mock_get_info.return_value = "Google Pixel 6"
 
         outputs = []
-        app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
+        app = BatteryOptimizerApp(
+            client=AdbClient(runner=SubprocessRunner(), output=lambda _: None),
+            state_dir=self.state_dir,
+        )
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 
         # Test without --yes
@@ -47,7 +50,10 @@ class TestCLICommands(unittest.TestCase):
     def test_apply_safe_subcommand_calls_app_method(self, mock_apply, mock_check_env):
         mock_check_env.return_value = True
         outputs = []
-        app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
+        app = BatteryOptimizerApp(
+            client=AdbClient(runner=SubprocessRunner(), output=lambda _: None),
+            state_dir=self.state_dir,
+        )
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 
         args = parse_args(["apply-safe"])
@@ -62,7 +68,10 @@ class TestCLICommands(unittest.TestCase):
         mock_check_env.return_value = True
         mock_revert.return_value = ["Restored something"]
         outputs = []
-        app = BatteryOptimizerApp(client=AdbClient(runner=SubprocessRunner()), state_dir=self.state_dir)
+        app = BatteryOptimizerApp(
+            client=AdbClient(runner=SubprocessRunner(), output=lambda _: None),
+            state_dir=self.state_dir,
+        )
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 
         args = parse_args(["revert"])
@@ -81,7 +90,7 @@ class TestCLICommands(unittest.TestCase):
         mock_has_entries.return_value = True
 
         outputs = []
-        client = AdbClient(runner=SubprocessRunner(), serial="test-device")
+        client = AdbClient(runner=SubprocessRunner(), serial="test-device", output=lambda _: None)
         app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 
@@ -109,7 +118,12 @@ class TestCLICommands(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         outputs = []
-        client = AdbClient(runner=SubprocessRunner(), serial="test-device", dry_run=True)
+        client = AdbClient(
+            runner=SubprocessRunner(),
+            serial="test-device",
+            dry_run=True,
+            output=lambda _: None,
+        )
         app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 
@@ -139,7 +153,7 @@ class TestCLICommands(unittest.TestCase):
         )
 
         outputs = []
-        client = AdbClient(runner=SubprocessRunner())
+        client = AdbClient(runner=SubprocessRunner(), output=lambda _: None)
         app = BatteryOptimizerApp(client=client, state_dir=self.state_dir)
         cli = BatteryOptimizerCLI(app=app, output=outputs.append)
 

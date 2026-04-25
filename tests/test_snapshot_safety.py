@@ -12,7 +12,7 @@ class TestSnapshotSafety(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp_dir.name)
         self.mock_runner = MagicMock()
-        self.client = AdbClient(runner=self.mock_runner)
+        self.client = AdbClient(runner=self.mock_runner, output=lambda _: None)
         self.client.serial = "test-device"
         self.store = StateStore(self.state_dir, self.client)
         self.recorder = StateRecorder(self.client, self.store)
@@ -27,17 +27,17 @@ class TestSnapshotSafety(unittest.TestCase):
 
         with self.assertRaises(SnapshotError) as cm:
             self.recorder.put_setting("global", "test_key", "test_value")
-        
+
         # Verify SnapshotError message contains namespace/key and error details
         self.assertIn("global", str(cm.exception))
         self.assertIn("test_key", str(cm.exception))
         # Depending on implementation, it might contain "some error"
-        
+
         # Assert no 'settings put' command was executed
         for call in self.mock_runner.run.call_args_list:
             args = " ".join(call[0][0])
             self.assertNotIn("settings put", args)
-            
+
         # Assert no state was saved in the store
         self.assertFalse(self.store.has_entries())
 
@@ -50,11 +50,11 @@ class TestSnapshotSafety(unittest.TestCase):
 
         self.assertIn("test_ns", str(cm.exception))
         self.assertIn("test_key", str(cm.exception))
-        
+
         for call in self.mock_runner.run.call_args_list:
             args = " ".join(call[0][0])
             self.assertNotIn("device_config put", args)
-            
+
         self.assertFalse(self.store.has_entries())
 
     def test_missing_setting_after_successful_list_is_snapshot_as_none(self):
@@ -66,11 +66,11 @@ class TestSnapshotSafety(unittest.TestCase):
             if "settings put global test_key test_value" in cmd:
                 return CommandResult(returncode=0, stdout="", stderr="")
             return CommandResult(returncode=0, stdout="", stderr="")
-        
+
         self.mock_runner.run.side_effect = side_effect
 
         self.recorder.put_setting("global", "test_key", "test_value")
-        
+
         # Assert old value is stored as None in the state store
         snapshot_key = "global/test_key"
         self.assertIn(snapshot_key, self.store.data["settings"])
@@ -85,11 +85,11 @@ class TestSnapshotSafety(unittest.TestCase):
             if "device_config put test_ns test_key test_value" in cmd:
                 return CommandResult(returncode=0, stdout="", stderr="")
             return CommandResult(returncode=0, stdout="", stderr="")
-        
+
         self.mock_runner.run.side_effect = side_effect
 
         self.recorder.put_device_config("test_ns", "test_key", "test_value")
-        
+
         # Assert old value is stored as None in the state store
         snapshot_key = "test_ns/test_key"
         self.assertIn(snapshot_key, self.store.data["device_config"])

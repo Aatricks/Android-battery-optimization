@@ -14,7 +14,7 @@ from android_battery_optimizer.android import parse_adb_devices, resolve_package
 
 
 class OptimizerTests(unittest.TestCase):
-    def make_app_and_cli(self, state_dir, user_inputs=None, verify=False):
+    def make_app_and_cli(self, state_dir, user_inputs=None, verify=False, capture_output=False):
         outputs = []
         input_values = list(user_inputs or [])
 
@@ -23,13 +23,17 @@ class OptimizerTests(unittest.TestCase):
                 raise AssertionError(f"Unexpected prompt: {prompt}")
             return input_values.pop(0)
 
+        def emit(message):
+            if capture_output:
+                outputs.append(message)
+
         runner = SubprocessRunner()
-        client = AdbClient(runner=runner, output=outputs.append)
+        client = AdbClient(runner=runner, output=emit)
         app = BatteryOptimizerApp(client=client, state_dir=state_dir)
         app.recorder.verify = verify
         cli = BatteryOptimizerCLI(
             app=app,
-            output=outputs.append,
+            output=emit,
             input_fn=fake_input,
         )
         return app, cli, outputs
@@ -308,7 +312,7 @@ class OptimizerTests(unittest.TestCase):
     def test_missing_adb_is_reported(self, mock_run, mock_which):
         mock_which.return_value = None
         with tempfile.TemporaryDirectory() as tmp:
-            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            _, cli, outputs = self.make_app_and_cli(Path(tmp), capture_output=True)
             self.assertFalse(cli.check_environment())
             self.assertIn("ADB was not found in PATH.", outputs[0])
 
@@ -318,7 +322,7 @@ class OptimizerTests(unittest.TestCase):
         mock_which.return_value = "/usr/bin/adb"
         mock_run.return_value = MagicMock(returncode=0, stdout="List of devices attached\n\n", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
-            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            _, cli, outputs = self.make_app_and_cli(Path(tmp), capture_output=True)
             self.assertFalse(cli.check_environment())
             self.assertIn("No ADB devices detected.", outputs[0])
 
@@ -346,7 +350,7 @@ class OptimizerTests(unittest.TestCase):
             stderr=""
         )
         with tempfile.TemporaryDirectory() as tmp:
-            _, cli, outputs = self.make_app_and_cli(Path(tmp))
+            _, cli, outputs = self.make_app_and_cli(Path(tmp), capture_output=True)
             self.assertFalse(cli.check_environment())
             self.assertIn("No authorized online device is available.", outputs[-1])
 
@@ -368,7 +372,9 @@ class OptimizerTests(unittest.TestCase):
         mock_run.side_effect = side_effect
 
         with tempfile.TemporaryDirectory() as tmp:
-            app, cli, outputs = self.make_app_and_cli(Path(tmp), user_inputs=["3", "n", "9"])
+            app, cli, outputs = self.make_app_and_cli(
+                Path(tmp), user_inputs=["3", "n", "9"], capture_output=True
+            )
             cli.client.serial = "serial-1"
 
             with patch.object(app, 'apply_experimental_optimizations') as mock_apply:
@@ -532,7 +538,7 @@ class OptimizerTests(unittest.TestCase):
         mock_run.side_effect = side_effect
 
         with tempfile.TemporaryDirectory() as tmp:
-            app, _, outputs = self.make_app_and_cli(Path(tmp))
+            app, _, outputs = self.make_app_and_cli(Path(tmp), capture_output=True)
             app.client.serial = "serial-1"
             app.rebind_device()
 
@@ -722,7 +728,7 @@ class OptimizerTests(unittest.TestCase):
         mock_run.side_effect = side_effect
 
         with tempfile.TemporaryDirectory() as tmp:
-            app, _, outputs = self.make_app_and_cli(Path(tmp))
+            app, _, outputs = self.make_app_and_cli(Path(tmp), capture_output=True)
             app.client.serial = "serial-1"
             app.rebind_device()
 
@@ -791,7 +797,7 @@ class OptimizerTests(unittest.TestCase):
     def test_adb_shell_uses_default_timeout(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         runner = SubprocessRunner()
-        client = AdbClient(runner=runner, serial="test-device")
+        client = AdbClient(runner=runner, serial="test-device", output=lambda _: None)
         client.shell(["settings", "list", "global"], mutate=True)
 
         mock_run.assert_called_with(

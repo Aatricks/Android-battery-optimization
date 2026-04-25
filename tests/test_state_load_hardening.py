@@ -25,7 +25,7 @@ class StateStoreLoadHardeningTests(unittest.TestCase):
         return state_path
 
     def _make_store(self, serial: str = "serial-1") -> StateStore:
-        client = AdbClient(runner=MagicMock())
+        client = AdbClient(runner=MagicMock(), output=lambda _: None)
         client.serial = serial
         return StateStore(self.state_dir, client)
 
