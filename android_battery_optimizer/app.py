@@ -1,6 +1,6 @@
 import shutil
 from pathlib import Path
-from typing import List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 from .adb import AdbClient, CommandError
 from .state import StateStore
 from .recorder import PACKAGE_USER_ID, StateRecorder
@@ -251,6 +251,91 @@ class BatteryOptimizerApp:
             mutate=True,
             timeout=self.client.LONG_TIMEOUT_SECONDS,
         )
+
+    def revert_saved_state(self) -> List[str]:
+        if not self.store.has_entries():
+            return []
+        return self.recorder.restore()
+
+    def diagnose(self, third_party_only: bool = True) -> Dict[str, Any]:
+        from .diagnose import Diagnoser
+        return Diagnoser(self.client).run(third_party_only=third_party_only)
+
+    def _get_critical_packages(self) -> Set[str]:
+        critical = set()
+        # Common prefixes
+        installed = self.get_installed_packages_set()
+        for pkg in installed:
+            if pkg.startswith(("com.android.", "com.google.android.", "android")):
+                critical.add(pkg)
+                
+        commands = {
+            "launcher": ["cmd", "package", "resolve-activity", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"],
+            "dialer": ["telecom", "get-default-dialer"],
+            "sms": ["settings", "get", "secure", "sms_default_application"],
+            "ime": ["settings", "get", "secure", "default_input_method"],
+            "a11y": ["settings", "get", "secure", "enabled_accessibility_services"],
+            "vpn": ["settings", "get", "secure", "always_on_vpn_app"],
+            "companion": ["cmd", "companiondevice", "list"],
+        }
+        
+        for name, cmd in commands.items():
+            try:
+                out = self.client.shell_text(cmd, check=False)
+                if out and out != "null" and "Error" not in out:
+                    if name == "launcher" and "packageName=" in out:
+                        for line in out.splitlines():
+                            if "packageName=" in line:
+                                critical.add(line.split("=")[1].strip())
+                    elif name == "ime":
+                        critical.add(out.split("/")[0])
+                    elif name == "a11y":
+                        for service in out.split(":"):
+                            if service:
+                                critical.add(service.split("/")[0])
+                    elif name == "companion":
+                        for line in out.splitlines():
+                            if "Package:" in line:
+                                critical.add(line.split("Package:")[1].strip())
+                    else:
+                        critical.add(out.strip())
+            except Exception:
+                pass
+        
+        return critical
+
+    def smart_restrict(self, aggressive: bool = False, min_last_used_days: Optional[int] = None) -> List[str]:
+        if not self.client.supports_appops():
+            raise ValueError("Device does not support `appops` command via `cmd`.")
+        if not self.client.supports_standby_bucket():
+            raise ValueError("Device does not support `am set-standby-bucket`.")
+
+        whitelist = set(self.load_whitelist())
+        critical = self._get_critical_packages()
+        skipped = []
+        
+        report = self.diagnose(third_party_only=True)
+        
+        with self.recorder.transaction():
+            self.recorder.prefetch_package_states()
+            for pkg_info in report["packages"]:
+                pkg = pkg_info["package"]
+                if pkg in whitelist or pkg in critical:
+                    skipped.append(pkg)
+                    continue
+                
+                rec = pkg_info["recommendation"]
+                
+                if aggressive and rec == "aggressive_restrict":
+                    self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
+                    self.recorder.set_standby_bucket(pkg, "restricted")
+                elif not aggressive and rec in ("restrict", "aggressive_restrict"):
+                    self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
+                    self.recorder.set_standby_bucket(pkg, "rare")
+                else:
+                    skipped.append(pkg)
+                    
+        return skipped
 
     def revert_saved_state(self) -> List[str]:
         if not self.store.has_entries():

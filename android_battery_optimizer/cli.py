@@ -266,6 +266,43 @@ class BatteryOptimizerCLI:
                 self.output("Background restrictions updated.")
                 return 0
 
+            elif args.command == "diagnose":
+                import json
+                self.output("Running diagnostics. This may take a moment...")
+                report = self.app.diagnose(third_party_only=args.third_party_only)
+                
+                if report["warnings"]:
+                    self.output("\nWarnings:")
+                    for w in report["warnings"]:
+                        self.output(f"  {w}")
+                        
+                self.output("\nDiagnosis Summary:")
+                for pkg in report["packages"]:
+                    self.output(f"  {pkg['package']}: {pkg['recommendation']} ({pkg['reason']})")
+                    
+                if args.output:
+                    with open(args.output, "w") as f:
+                        json.dump(report, f, indent=2)
+                    self.output(f"\nReport saved to {args.output}")
+                return 0
+
+            elif args.command == "smart-restrict":
+                if not args.yes and not args.dry_run:
+                    self.output("Error: --yes is required for smart-restrict unless --dry-run is used.")
+                    return 1
+                    
+                mode = "aggressive" if args.aggressive else "balanced"
+                self.output(f"Running smart-restrict in {mode} mode...")
+                
+                skipped = self.app.smart_restrict(
+                    aggressive=args.aggressive, 
+                    min_last_used_days=args.min_last_used_days
+                )
+                
+                self.output(f"Skipped or ignored {len(skipped)} packages.")
+                self.output("Smart restrict applied successfully.")
+                return 0
+
             elif args.command == "revert":
                 self.output("Restoring saved state...")
                 messages = self.app.revert_saved_state()
