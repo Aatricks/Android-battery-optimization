@@ -9,44 +9,31 @@ This project is now `safe by default`:
 
 This is not a guarantee of better battery life. Android already includes its own battery-management systems, and some device-specific tweaks can reduce battery drain on one phone while breaking notifications, sync, companion devices, or app reliability on another.
 
-## What Android Already Does
+## Safety Model
 
-Android already ships with several battery-management features:
-- [Doze](https://developer.android.com/training/monitoring-device-state/doze-standby) defers background CPU, network, jobs, syncs, and standard alarms when a device is idle.
-- [App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby) limits background activity for apps the user is not actively using.
-- [App Standby Buckets](https://developer.android.com/topic/performance/appstandby) prioritize apps dynamically based on actual usage.
-- [App hibernation](https://developer.android.com/topic/performance/app-hibernation) can reset permissions and stop background jobs or notifications for long-unused apps.
-- Android documents [Developer Options](https://developer.android.com/studio/debug/dev-options) primarily as profiling and debugging tools, not as general end-user battery settings.
+- **Per-Device Isolation:** State is stored per ADB serial under the user state directory (`~/.local/state/android-battery-optimizer/devices/<serial>/`).
+- **Device Verification:** The `revert` command refuses to run if the connected device does not match the saved snapshot (checked via serial and build fingerprint).
+- **Dry-Run Mode:** Running with `--dry-run` prints planned mutations and does not write any rollback state.
+- **Atomic Writes:** State updates are atomic, using temporary files and `fsync` to prevent corruption during power loss or crashes.
+- **Fail-Safe Restoration:** If restoration of a specific setting fails, the tool logs the error and preserves the state for future retry.
+- **Partial Compatibility:** Restore may still fail if Android or the OEM refuses specific commands (e.g., due to permission changes after an OS update).
 
-That is why this project no longer treats test-only commands like `dumpsys deviceidle force-idle` as normal “optimization” steps.
+## Known Limitations
 
-## What This Tool Changes Safely
+- **Compatibility:** Android/OEM compatibility varies significantly. Features like `device_config` require Android 8.0+, and App Standby Buckets require Android 9.0+.
+- **Silent Ignorance:** Some settings may be accepted by ADB but silently ignored or overridden by the OS or vendor-specific power management.
+- **No Guarantees:** Battery gains are highly dependent on usage patterns and are not guaranteed.
+- **App Behavior:** Experimental optimizations may degrade notifications, background sync, location accuracy, or overall app behavior.
+- **Connection Requirements:** Root is not required, but an authorized ADB connection is mandatory.
 
-`Apply Documented Safe Optimizations` currently enables AOSP’s abusive-app auto-restriction tracker:
-- `device_config put activity_manager bg_auto_restrict_abusive_apps 1`
-- `device_config put activity_manager bg_current_drain_auto_restrict_abusive_apps_enabled 1`
+## Recommended Workflow
 
-Reference: [AOSP app background trackers](https://source.android.com/docs/core/power/trackers)
-
-This is intentionally narrow. The default path is supposed to be conservative, documented, and reversible.
-
-## Experimental Features
-
-The menu also includes experimental flows:
-- `Apply Experimental Optimizations`
-- `Apply Samsung Experimental Optimizations`
-- `Restrict 3rd Party Apps (Experimental, with Whitelist)`
-- `Run Background Optimization (Dexopt, Experimental)`
-
-These can help on some devices, but they can also cause regressions:
-- delayed or missing notifications
-- broken background sync
-- messaging apps becoming unreliable
-- music playback interruption
-- companion device or watch issues
-- vendor-specific instability on Samsung devices
-
-The Samsung path is deliberately narrower than older versions of this repo. Undocumented property-like toggles and non-reversible package-data wipes were removed from the default implementation.
+1. **Status Check:** Run `status` to confirm the device is detected and check for existing rollback state.
+2. **Dry Run:** Run your planned command with `--dry-run` to see exactly what ADB commands will be executed.
+3. **Safe Start:** Apply safe optimizations first (`apply-safe`).
+4. **Observation:** Test the device for at least 24 hours to ensure no critical apps are broken.
+5. **Experimental Path:** Only then consider experimental optimizations, and always keep important apps (email, chat, music) in the **whitelist** before using `restrict-apps`.
+6. **Revert:** Use `revert` immediately if you experience unexpected behavior or degraded performance.
 
 ## Requirements
 
@@ -71,108 +58,62 @@ android-battery-optimizer --help
 
 ## Usage
 
-Direct script:
-
+### Interactive Menu
+Run without a command to start the interactive menu:
 ```bash
 python3 optimizer.py
-```
-
-Linux wrapper:
-
-```bash
-./optimize.sh
-```
-
-Package entry point:
-
-```bash
+# or
 android-battery-optimizer
 ```
 
-Optional flags:
+### Non-Interactive CLI
+The tool supports direct subcommands for automation:
 
-```bash
-android-battery-optimizer --serial SERIAL
-android-battery-optimizer --dry-run
-android-battery-optimizer --state-dir /path/to/state
-```
+| Command | Description |
+|---------|-------------|
+| `status` | Checks ADB environment and device info |
+| `apply-safe` | Applies documented safe optimizations |
+| `apply-experimental --yes` | Applies experimental optimizations (requires --yes) |
+| `apply-samsung-experimental --yes` | Applies Samsung optimizations (requires --yes) |
+| `restrict-apps --level {ignore,deny,allow} --yes` | Restrict background apps |
+| `revert` | Restores saved state for the selected device |
+| `whitelist list` | List whitelisted apps |
+| `whitelist add <package>` | Add app to whitelist |
+| `whitelist remove <package>` | Remove app from whitelist |
 
-## Development
+### Global Flags
+- `--serial <id>`: Target a specific device serial.
+- `--dry-run`: Show what would happen without making changes.
+- `--state-dir <path>`: Use a custom directory for state and whitelist.
 
-Run tests:
+## Troubleshooting
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+- **ADB not found:** Ensure Android Platform Tools are installed and `adb` is in your system PATH.
+- **Unauthorized device:** Check your phone for the "Allow USB debugging?" prompt and select "Always allow".
+- **Multiple devices:** Use `--serial <serial>` to target a specific device, or select from the list in interactive mode.
+- **Restore refused:** The tool prevents restoring state to the wrong device. If you've reinstalled your OS, the fingerprint might have changed; verify manually.
+- **Corrupt state file:** If a state file is corrupted, it is quarantined (renamed to `.corrupt.<timestamp>`) and a fresh state is started.
+- **Command timeout:** Some commands (like `bg-dexopt-job`) take a long time. The tool uses extended timeouts for these, but poor cables or USB hubs can still cause failures.
 
 ## Data Location
 
-Mutable files are no longer stored in the repo root.
+Mutable files are stored under:
+`~/.local/state/android-battery-optimizer/`
 
-By default, the script uses:
-
-```text
-~/.local/state/android-battery-optimizer/
-```
-
-Files written there:
-- `whitelist.txt`
-- `state.json`
-
-`state.json` is the saved rollback snapshot. If a restore partially fails, the snapshot is kept so the restore can be retried.
+- `whitelist.txt`: List of packages to exclude from restrictions.
+- `devices/<serial>/state.json`: Rollback snapshot for that specific device.
 
 ## Whitelist Behavior
 
-If you use `Restrict 3rd Party Apps`, apps in the whitelist are skipped and their state is not modified by the tool.
-
-Use the whitelist for apps where you want to maintain their current background behavior, such as:
-- messaging apps
-- email apps
-- music or podcast apps
-- companion device apps
-- smartwatch / wearable apps
-
-## What Changed From Older Versions
-
-Older versions of this repo mixed together:
-- documented Android behavior
-- anecdotal device advice
-- test-only ADB commands
-- vendor-specific settings with unclear support
-
-This version removes or demotes several risky patterns from the default flow, including:
-- disabling App Standby as an “optimization”
-- setting `ro.config.low_ram` through Settings
-- using `dumpsys deviceidle force-idle` as a persistent end-user tweak
-- treating app hibernation test toggles as normal optimization settings
-- guessing factory defaults during revert
-
-## Notes On Manual Tweaks
-
-Some common battery advice is highly device-specific or workload-specific. This repo no longer makes strong claims like:
-- “set no background processes”
-- “enable Don’t keep activities”
-- “widgets are massive battery drainers”
-- “disable updates broadly”
-
-Those changes can help in narrow cases, but they can also create obvious usability regressions. If you try them, treat them as manual experiments, not universally good defaults.
-
-## Verification Status
-
-Observed in this repo:
-- the optimizer now uses argv-based subprocess calls instead of `shell=True`
-- mutating changes are snapshotted before being applied
-- rollback restores saved prior values instead of hard-coded defaults
-- mutable files moved out of the repo root
-
-Blocked verification:
-- no live Android device or local `adb` binary was available in the implementation environment, so end-to-end device behavior has not been validated here
+If you use `Restrict 3rd Party Apps`, apps in the whitelist are skipped.
+Use the whitelist for:
+- Messaging and Email apps (to ensure notifications arrive)
+- Music or Podcast apps (to prevent playback cut-off)
+- Companion device apps (Smartwatches, Galaxy Wearable, etc.)
 
 ## References
 
 - [Optimize for Doze and App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby)
 - [App Standby Buckets](https://developer.android.com/topic/performance/appstandby)
-- [App hibernation](https://developer.android.com/topic/performance/app-hibernation)
-- [Configure on-device developer options](https://developer.android.com/studio/debug/dev-options)
 - [AOSP app background trackers](https://source.android.com/docs/core/power/trackers)
 - [Android dumpsys battery diagnostics](https://developer.android.com/tools/dumpsys)
