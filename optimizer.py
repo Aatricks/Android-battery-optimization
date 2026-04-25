@@ -35,7 +35,12 @@ class CommandResult:
 
 
 class CommandRunner:
-    def run(self, args: Sequence[str], input_data: Optional[str] = None) -> CommandResult:
+    def run(
+        self,
+        args: Sequence[str],
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> CommandResult:
         raise NotImplementedError
 
     def which(self, name: str) -> Optional[str]:
@@ -43,19 +48,42 @@ class CommandRunner:
 
 
 class SubprocessRunner(CommandRunner):
-    def run(self, args: Sequence[str], input_data: Optional[str] = None) -> CommandResult:
-        completed = subprocess.run(args, capture_output=True, text=True, input=input_data)
-        return CommandResult(
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
+    def run(
+        self,
+        args: Sequence[str],
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> CommandResult:
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                input=input_data,
+                timeout=timeout,
+            )
+            return CommandResult(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            result = CommandResult(returncode=-1, stdout=stdout, stderr=stderr)
+            raise CommandError(
+                f"Command timed out after {timeout}s: {' '.join(args)}",
+                result=result,
+            ) from exc
 
     def which(self, name: str) -> Optional[str]:
         return shutil.which(name)
 
 
 class AdbClient:
+    DEFAULT_TIMEOUT_SECONDS = 30
+    LONG_TIMEOUT_SECONDS = 300
+
     def __init__(
         self,
         runner: CommandRunner,
@@ -107,7 +135,13 @@ class AdbClient:
         return " ".join(shlex.quote(arg) for arg in args)
 
     def run_adb(
-        self, args: Sequence[object], *, mutate: bool = False, check: bool = True, input_data: Optional[str] = None
+        self,
+        args: Sequence[object],
+        *,
+        mutate: bool = False,
+        check: bool = True,
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> CommandResult:
         command = self._base_command() + self._stringify(args)
         if mutate and self.dry_run:
@@ -116,7 +150,10 @@ class AdbClient:
                 self.output(f"[dry-run-input]\n{input_data}")
             return CommandResult(returncode=0, stdout="", stderr="")
 
-        result = self.runner.run(command, input_data=input_data)
+        if timeout is None and mutate:
+            timeout = self.DEFAULT_TIMEOUT_SECONDS
+
+        result = self.runner.run(command, input_data=input_data, timeout=timeout)
         if check and result.returncode != 0:
             stderr = result.stderr.strip()
             stdout = result.stdout.strip()
@@ -125,20 +162,51 @@ class AdbClient:
         return result
 
     def shell(
-        self, args: Sequence[object], *, mutate: bool = False, check: bool = True, input_data: Optional[str] = None
+        self,
+        args: Sequence[object],
+        *,
+        mutate: bool = False,
+        check: bool = True,
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> CommandResult:
-        return self.run_adb(["shell", *args], mutate=mutate, check=check, input_data=input_data)
+        return self.run_adb(
+            ["shell", *args],
+            mutate=mutate,
+            check=check,
+            input_data=input_data,
+            timeout=timeout,
+        )
 
     def shell_text(
-        self, args: Sequence[object], *, mutate: bool = False, check: bool = True, input_data: Optional[str] = None
+        self,
+        args: Sequence[object],
+        *,
+        mutate: bool = False,
+        check: bool = True,
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> str:
-        return self.shell(args, mutate=mutate, check=check, input_data=input_data).stdout.strip()
+        return self.shell(
+            args, mutate=mutate, check=check, input_data=input_data, timeout=timeout
+        ).stdout.strip()
 
-    def local_text(self, args: Sequence[object], *, check: bool = True, input_data: Optional[str] = None) -> str:
-        result = self.runner.run(self._stringify(args), input_data=input_data)
+    def local_text(
+        self,
+        args: Sequence[object],
+        *,
+        check: bool = True,
+        input_data: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        result = self.runner.run(
+            self._stringify(args), input_data=input_data, timeout=timeout
+        )
         if check and result.returncode != 0:
             details = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            raise CommandError(f"{self._format(self._stringify(args))} failed: {details}", result=result)
+            raise CommandError(
+                f"{self._format(self._stringify(args))} failed: {details}", result=result
+            )
         return result.stdout.strip()
 
 
@@ -942,7 +1010,11 @@ class BatteryOptimizerApp:
         return skipped
 
     def run_bg_dexopt(self) -> None:
-        self.client.shell(["cmd", "package", "bg-dexopt-job"], mutate=True)
+        self.client.shell(
+            ["cmd", "package", "bg-dexopt-job"],
+            mutate=True,
+            timeout=self.client.LONG_TIMEOUT_SECONDS,
+        )
 
     def revert_saved_state(self) -> List[str]:
         if not self.store.has_entries():

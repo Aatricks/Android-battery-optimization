@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -277,7 +278,8 @@ class OptimizerTests(unittest.TestCase):
                 ["adb", "-s", "serial-1", "shell", "settings", "delete", "global", "wifi_scan_throttle_enabled"],
                 capture_output=True,
                 text=True,
-                input=None
+                input=None,
+                timeout=30
             )
 
     @patch("optimizer.subprocess.run")
@@ -309,15 +311,15 @@ class OptimizerTests(unittest.TestCase):
 
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "cmd", "appops", "set", "com.example.app", "RUN_ANY_IN_BACKGROUND", "allow"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "am", "set-standby-bucket", "com.example.app", "active"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "pm", "enable", "--user", "0", "com.example.app"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
 
     @patch("optimizer.subprocess.run")
@@ -380,7 +382,7 @@ class OptimizerTests(unittest.TestCase):
             # other_setting (index 1) should NOT be reverted
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "some_setting", "old_value"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             
             # Verify other_setting was NOT reverted
@@ -461,7 +463,7 @@ class OptimizerTests(unittest.TestCase):
             # setting0 should be rolled back to old0
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             
             # state file should be clean (setting0 was reverted, setting1 never ran successfully)
@@ -500,7 +502,7 @@ class OptimizerTests(unittest.TestCase):
             # Rollback was attempted
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
-                capture_output=True, text=True, input=None
+                capture_output=True, text=True, input=None, timeout=30
             )
             
             # Since rollback failed, state.json should contain setting0 but NOT setting1
@@ -537,6 +539,49 @@ class OptimizerTests(unittest.TestCase):
                 data = json.load(f)
                 self.assertIn("global/setting0", data["settings"])
                 self.assertEqual(data["settings"]["global/setting0"]["value"], "old0")
+
+    @patch("optimizer.subprocess.run")
+    def test_subprocess_runner_timeout_raises_command_error(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["sleep", "10"], timeout=1.0, output=b"partial stdout", stderr=b"partial stderr"
+        )
+        runner = SubprocessRunner()
+        with self.assertRaises(CommandError) as cm:
+            runner.run(["sleep", "10"], timeout=1.0)
+        
+        self.assertIn("Command timed out after 1.0s: sleep 10", str(cm.exception))
+        self.assertEqual(cm.exception.result.stdout, "partial stdout")
+        self.assertEqual(cm.exception.result.stderr, "partial stderr")
+
+    @patch("optimizer.subprocess.run")
+    def test_adb_shell_uses_default_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        runner = SubprocessRunner()
+        client = AdbClient(runner=runner)
+        client.shell(["settings", "list", "global"], mutate=True)
+        
+        mock_run.assert_called_with(
+            ["adb", "shell", "settings", "list", "global"],
+            capture_output=True,
+            text=True,
+            input=None,
+            timeout=30
+        )
+
+    @patch("optimizer.subprocess.run")
+    def test_bg_dexopt_uses_long_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.run_bg_dexopt()
+            
+            mock_run.assert_called_with(
+                ["adb", "shell", "cmd", "package", "bg-dexopt-job"],
+                capture_output=True,
+                text=True,
+                input=None,
+                timeout=300
+            )
 
 
 if __name__ == "__main__":
