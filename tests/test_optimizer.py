@@ -561,9 +561,9 @@ class OptimizerTests(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="  Package com.example.app:\n    RUN_ANY_IN_BACKGROUND: allow\n", stderr="")
             if "dumpsys usagestats" in cmd:
                 return MagicMock(returncode=0, stdout="package=com.example.app u=0 bucket=active reason=...\n", stderr="")
-            if "list packages -d" in cmd:
+            if "list packages --user 0 -d" in cmd:
                 return MagicMock(returncode=0, stdout="", stderr="")
-            if "list packages -e" in cmd:
+            if "list packages --user 0 -e" in cmd:
                 return MagicMock(returncode=0, stdout="package:com.example.app\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
         mock_run.side_effect = side_effect
@@ -591,6 +591,82 @@ class OptimizerTests(unittest.TestCase):
             mock_run.assert_any_call(
                 ["adb", "-s", "serial-1", "shell", "pm", "enable", "--user", "0", "com.example.app"],
                 capture_output=True, text=True, input=None, timeout=30
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_prefetch_package_states_uses_user_0_for_enabled_and_disabled_lists(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            app.recorder.prefetch_package_states()
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "pm", "list", "packages", "--user", "0", "-d"],
+                capture_output=True,
+                text=True,
+                input=None,
+                timeout=30,
+            )
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "pm", "list", "packages", "--user", "0", "-e"],
+                capture_output=True,
+                text=True,
+                input=None,
+                timeout=30,
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_set_package_enabled_still_mutates_user_0(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.recorder._prefetch_package_enabled_success = True
+            app.recorder._package_enabled_cache["com.example.app"] = True
+
+            app.recorder.set_package_enabled("com.example.app", enabled=False, verify=False)
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "pm", "disable-user", "--user", "0", "com.example.app"],
+                capture_output=True,
+                text=True,
+                input=None,
+                timeout=30,
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_restore_package_enabled_still_mutates_user_0(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "pm list packages --user 0 -d com.example.app" in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.app\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.store.data["packages"] = {
+                "com.example.app": {
+                    "enabled": False,
+                    "appops": {},
+                    "standby_bucket": None,
+                }
+            }
+
+            app.recorder.restore()
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "pm", "disable-user", "--user", "0", "com.example.app"],
+                capture_output=True,
+                text=True,
+                input=None,
+                timeout=30,
             )
 
     @patch("android_battery_optimizer.adb.subprocess.run")

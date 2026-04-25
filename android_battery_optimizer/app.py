@@ -1,9 +1,9 @@
 import shutil
 from pathlib import Path
-from typing import List, Set, Sequence
+from typing import List, Optional, Sequence, Set
 from .adb import AdbClient, CommandError
 from .state import StateStore
-from .recorder import StateRecorder
+from .recorder import PACKAGE_USER_ID, StateRecorder
 
 WHITELIST_FILE = "whitelist.txt"
 
@@ -66,8 +66,10 @@ class BatteryOptimizerApp:
         info = self.client.get_device_info_struct()
         return f"{info.brand} {info.model} (Android {info.android_release})".strip()
 
-    def get_packages(self, third_party: bool = True) -> List[str]:
+    def get_packages(self, third_party: bool = True, user_id: Optional[str] = None) -> List[str]:
         args: List[object] = ["pm", "list", "packages"]
+        if user_id is not None:
+            args.extend(["--user", user_id])
         if third_party:
             args.append("-3")
         result = self.client.shell(args, check=False)
@@ -87,8 +89,8 @@ class BatteryOptimizerApp:
                 packages.append(line.split(":", 1)[1].strip())
         return sorted(packages)
 
-    def get_installed_packages_set(self) -> Set[str]:
-        return set(self.get_packages(third_party=False))
+    def get_installed_packages_set(self, user_id: Optional[str] = None) -> Set[str]:
+        return set(self.get_packages(third_party=False, user_id=user_id))
 
     def validate_package(self, package: str) -> None:
         if package not in self.get_installed_packages_set():
@@ -211,7 +213,7 @@ class BatteryOptimizerApp:
                 for key, value in values.items():
                     self.recorder.put_setting(namespace, key, value)
 
-            installed = self.get_installed_packages_set()
+            installed = self.get_installed_packages_set(user_id=PACKAGE_USER_ID)
             for package in (
                 "com.samsung.android.game.gos",
                 "com.samsung.android.game.gamelab",

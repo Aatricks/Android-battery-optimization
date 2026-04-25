@@ -701,7 +701,7 @@ class TestSafetyRegressions(unittest.TestCase):
         }
         app, _ = self.make_saved_state_app(state_data)
         self.set_response("adb -s test-device shell pm enable --user 0 com.example.app")
-        self.set_response("adb -s test-device shell pm list packages -e com.example.app", stdout="")
+        self.set_response("adb -s test-device shell pm list packages --user 0 -e com.example.app", stdout="")
 
         messages = app.recorder.restore()
 

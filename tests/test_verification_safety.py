@@ -88,21 +88,31 @@ class TestVerificationSafety(unittest.TestCase):
 
         self.assertIn("package-enabled verification readback failed", str(cm.exception))
 
-    def test_verify_package_enabled_success_enabled(self):
+    def test_verify_package_enabled_uses_user_0_for_enabled_readback(self):
         self.mock_runner.run.return_value = CommandResult(
             returncode=0,
             stdout="package:pkg\n",
             stderr="",
         )
         self.recorder.verify_package_enabled("pkg", True)
+        self.mock_runner.run.assert_called_with(
+            ["adb", "-s", "test-device", "shell", "pm", "list", "packages", "--user", "0", "-e", "pkg"],
+            input_data=None,
+            timeout=30,
+        )
 
-    def test_verify_package_enabled_success_disabled(self):
+    def test_verify_package_disabled_uses_user_0_for_disabled_readback(self):
         self.mock_runner.run.return_value = CommandResult(
             returncode=0,
             stdout="package:pkg\n",
             stderr="",
         )
         self.recorder.verify_package_enabled("pkg", False)
+        self.mock_runner.run.assert_called_with(
+            ["adb", "-s", "test-device", "shell", "pm", "list", "packages", "--user", "0", "-d", "pkg"],
+            input_data=None,
+            timeout=30,
+        )
 
     def test_delete_setting_does_not_pass_verification_when_readback_fails(self):
         self.mock_runner.run.return_value = CommandResult(returncode=1, stdout="", stderr="device offline")

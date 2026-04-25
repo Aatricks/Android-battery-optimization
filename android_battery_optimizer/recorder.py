@@ -5,6 +5,8 @@ from .adb import AdbClient, CommandError
 from .state import StateStore
 from .operations import STANDBY_BUCKET_MAP
 
+PACKAGE_USER_ID = "0"
+
 class SnapshotError(RuntimeError):
     pass
 
@@ -158,9 +160,9 @@ class StateRecorder:
         elif type_ == "package_enabled":
             package = str(entry["package"])
             prior_value = bool(entry["prior_value"])
-            command = ["pm", "enable", "--user", "0", package]
+            command = ["pm", "enable", "--user", PACKAGE_USER_ID, package]
             if not prior_value:
-                command = ["pm", "disable-user", "--user", "0", package]
+                command = ["pm", "disable-user", "--user", PACKAGE_USER_ID, package]
             self.client.shell(command, mutate=True)
 
     def _remove_snapshot_for_entry(self, entry: Dict[str, object]) -> None:
@@ -236,8 +238,22 @@ class StateRecorder:
 
     def prefetch_package_states(self) -> None:
         try:
-            disabled = self.client.shell_text(["pm", "list", "packages", "-d"])
-            enabled = self.client.shell_text(["pm", "list", "packages", "-e"])
+            disabled = self.client.shell_text([
+                "pm",
+                "list",
+                "packages",
+                "--user",
+                PACKAGE_USER_ID,
+                "-d",
+            ])
+            enabled = self.client.shell_text([
+                "pm",
+                "list",
+                "packages",
+                "--user",
+                PACKAGE_USER_ID,
+                "-e",
+            ])
             for line in disabled.splitlines():
                 if ":" in line:
                     self._package_enabled_cache[line.split(":", 1)[1].strip()] = False
@@ -469,9 +485,9 @@ class StateRecorder:
 
     def set_package_enabled(self, package: str, enabled: bool, verify: bool = True) -> None:
         self.snapshot_package_enabled(package, new_value=enabled)
-        command = ["pm", "enable", "--user", "0", package]
+        command = ["pm", "enable", "--user", PACKAGE_USER_ID, package]
         if not enabled:
-            command = ["pm", "disable-user", "--user", "0", package]
+            command = ["pm", "disable-user", "--user", PACKAGE_USER_ID, package]
         self._queue_or_run(command)
         if not self._in_transaction and self.verify and verify:
             try:
@@ -609,7 +625,15 @@ class StateRecorder:
         if self.client.dry_run:
             return
         result = self.client.shell(
-            ["pm", "list", "packages", "-e" if expected_enabled else "-d", package],
+            [
+                "pm",
+                "list",
+                "packages",
+                "--user",
+                PACKAGE_USER_ID,
+                "-e" if expected_enabled else "-d",
+                package,
+            ],
             check=False,
         )
         if result.returncode != 0:
@@ -817,9 +841,9 @@ class StateRecorder:
             enabled = cast(Optional[bool], item.get("enabled"))
             if enabled is not None:
                 try:
-                    command = ["pm", "enable", "--user", "0", package]
+                    command = ["pm", "enable", "--user", PACKAGE_USER_ID, package]
                     if not enabled:
-                        command = ["pm", "disable-user", "--user", "0", package]
+                        command = ["pm", "disable-user", "--user", PACKAGE_USER_ID, package]
                     self._restore_and_verify(
                         lambda: self.client.shell(command, mutate=True),
                         lambda: self.verify_package_enabled(package, enabled),
