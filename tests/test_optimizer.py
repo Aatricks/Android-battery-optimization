@@ -39,29 +39,29 @@ class OptimizerTests(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            
+
             # Serial 1
             app1, _, _ = self.make_app_and_cli(tmp_path)
             app1.client.serial = "serial-1"
             app1.rebind_device()
             with app1.recorder.transaction():
                 app1.recorder.put_setting("global", "test", "1")
-            
+
             state_file_1 = tmp_path / "devices" / "serial-1" / "state.json"
             self.assertTrue(state_file_1.exists())
-            
+
             # Serial 2
             app2, _, _ = self.make_app_and_cli(tmp_path)
             app2.client.serial = "serial-2"
             app2.rebind_device()
             self.assertFalse(app2.store.has_entries())
-            
+
             with app2.recorder.transaction():
                 app2.recorder.put_setting("global", "test", "2")
-            
+
             state_file_2 = tmp_path / "devices" / "serial-2" / "state.json"
             self.assertTrue(state_file_2.exists())
-            
+
             # Sanitize test
             app3, _, _ = self.make_app_and_cli(tmp_path)
             app3.client.serial = "serial:3/path"
@@ -79,10 +79,10 @@ class OptimizerTests(unittest.TestCase):
             app.client.serial = "serial-1"
             app.client.dry_run = True
             app.rebind_device()
-            
+
             with app.recorder.transaction():
                 app.recorder.put_setting("global", "test", "1")
-            
+
             self.assertFalse((Path(tmp) / "devices").exists())
 
     @patch("android_battery_optimizer.adb.subprocess.run")
@@ -98,25 +98,25 @@ class OptimizerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
-            
+
             self.current_serial = "serial-1"
             app.client.serial = "serial-1"
             app.rebind_device()
-            
+
             with app.recorder.transaction():
                 app.recorder.put_setting("global", "test", "1")
-            
+
             # Switch serial
             self.current_serial = "serial-2"
             app.client.serial = "serial-2"
             # Manually point store back to serial-1 to simulate loading it
             app.store.path = Path(tmp) / "devices" / "serial-1" / "state.json"
             app.store.data = app.store._load()
-            
+
             with self.assertRaises(ValueError) as cm:
                 app.revert_saved_state()
             self.assertIn("Device serial mismatch", str(cm.exception))
-            
+
             # Ensure no restore ADB command was run (except getprop)
             for call in mock_run.call_args_list:
                 args = call[0][0]
@@ -132,11 +132,11 @@ class OptimizerTests(unittest.TestCase):
             state_file = serial_dir / "state.json"
             with state_file.open("w") as f:
                 f.write("{invalid json")
-            
+
             app, _, _ = self.make_app_and_cli(tmp_path)
             app.client.serial = "serial-1"
             app.rebind_device()
-            
+
             self.assertEqual(app.store.data["settings"], {})
             self.assertTrue(any(f.name.startswith("state.json.corrupt.") for f in serial_dir.iterdir()))
 
@@ -147,12 +147,12 @@ class OptimizerTests(unittest.TestCase):
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
             app.rebind_device()
-            
+
             app.store.save()
             state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
             self.assertTrue(state_file.exists())
             self.assertFalse(state_file.with_suffix(".tmp").exists())
-            
+
             with state_file.open("r") as f:
                 data = json.load(f)
                 self.assertEqual(data["version"], 2)
@@ -243,11 +243,11 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, cli, outputs = self.make_app_and_cli(Path(tmp), user_inputs=["3", "n", "9"])
             cli.client.serial = "serial-1"
-            
+
             with patch.object(app, 'apply_experimental_optimizations') as mock_apply:
                 cli.run()
                 mock_apply.assert_not_called()
-                
+
             self.assertIn("Skipped experimental optimizations.", outputs)
 
     @patch("android_battery_optimizer.adb.subprocess.run")
@@ -318,6 +318,82 @@ class OptimizerTests(unittest.TestCase):
             )
 
     @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_appop_default_rollback_uses_set_default_not_reset(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            app.recorder._perform_rollback(
+                {
+                    "type": "appop",
+                    "package": "com.example.app",
+                    "op": "RUN_ANY_IN_BACKGROUND",
+                    "prior_value": "default",
+                }
+            )
+
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "cmd", "appops", "set", "com.example.app", "RUN_ANY_IN_BACKGROUND", "default"],
+                capture_output=True, text=True, input=None, timeout=30
+            )
+            self.assertFalse(
+                any("cmd appops reset" in " ".join(call.args[0]) for call in mock_run.call_args_list)
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_restore_default_appop_uses_set_default_not_reset(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.store.data["packages"] = {
+                "com.example.app": {
+                    "enabled": None,
+                    "appops": {"RUN_ANY_IN_BACKGROUND": "default"},
+                    "standby_bucket": None,
+                }
+            }
+
+            messages = app.recorder.restore()
+
+            self.assertTrue(any("Restored com.example.app appop RUN_ANY_IN_BACKGROUND" in m for m in messages))
+            mock_run.assert_any_call(
+                ["adb", "-s", "serial-1", "shell", "cmd", "appops", "set", "com.example.app", "RUN_ANY_IN_BACKGROUND", "default"],
+                capture_output=True, text=True, input=None, timeout=30
+            )
+            self.assertFalse(
+                any("cmd appops reset" in " ".join(call.args[0]) for call in mock_run.call_args_list)
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_verify_appop_never_calls_cmd_appops_reset_with_op_argument(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            app.recorder._perform_rollback(
+                {
+                    "type": "appop",
+                    "package": "com.example.app",
+                    "op": "RUN_ANY_IN_BACKGROUND",
+                    "prior_value": "default",
+                }
+            )
+            app.store.data["packages"] = {
+                "com.example.app": {
+                    "enabled": None,
+                    "appops": {"RUN_ANY_IN_BACKGROUND": "default"},
+                    "standby_bucket": None,
+                }
+            }
+            app.recorder.restore()
+
+            for call in mock_run.call_args_list:
+                self.assertNotIn("cmd appops reset", " ".join(call.args[0]))
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_restore_reports_failures(self, mock_run):
         def side_effect(args, **kwargs):
             cmd = " ".join(args)
@@ -379,7 +455,7 @@ class OptimizerTests(unittest.TestCase):
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "some_setting", "old_value"],
                 capture_output=True, text=True, input=None, timeout=30
             )
-            
+
             # Verify other_setting was NOT reverted
             for call in mock_run.call_args_list:
                 args = call[0][0]
@@ -460,7 +536,7 @@ class OptimizerTests(unittest.TestCase):
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
                 capture_output=True, text=True, input=None, timeout=30
             )
-            
+
             # state file should be clean (setting0 was reverted, setting1 never ran successfully)
             state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
             if state_file.exists():
@@ -499,7 +575,7 @@ class OptimizerTests(unittest.TestCase):
                 ["adb", "-s", "serial-1", "shell", "settings", "put", "global", "setting0", "old0"],
                 capture_output=True, text=True, input=None, timeout=30
             )
-            
+
             # Since rollback failed, state.json should contain setting0 but NOT setting1
             state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
             self.assertTrue(state_file.exists())
@@ -508,7 +584,7 @@ class OptimizerTests(unittest.TestCase):
                 self.assertIn("global/setting0", data["settings"])
                 self.assertEqual(data["settings"]["global/setting0"]["value"], "old0")
                 self.assertNotIn("global/setting1", data["settings"])
-            
+
             self.assertTrue(any("Partial state corruption" in out for out in outputs))
 
     @patch("android_battery_optimizer.adb.subprocess.run")
@@ -543,7 +619,7 @@ class OptimizerTests(unittest.TestCase):
         runner = SubprocessRunner()
         with self.assertRaises(CommandError) as cm:
             runner.run(["sleep", "10"], timeout=1.0)
-        
+
         self.assertIn("Command timed out after 1.0s: sleep 10", str(cm.exception))
         self.assertEqual(cm.exception.result.stdout, "partial stdout")
         self.assertEqual(cm.exception.result.stderr, "partial stderr")
@@ -554,7 +630,7 @@ class OptimizerTests(unittest.TestCase):
         runner = SubprocessRunner()
         client = AdbClient(runner=runner)
         client.shell(["settings", "list", "global"], mutate=True)
-        
+
         mock_run.assert_called_with(
             ["adb", "shell", "settings", "list", "global"],
             capture_output=True,
@@ -569,7 +645,7 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.run_bg_dexopt()
-            
+
             mock_run.assert_called_with(
                 ["adb", "shell", "cmd", "package", "bg-dexopt-job"],
                 capture_output=True,
@@ -602,16 +678,16 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
-            
+
             # Setup whitelist
             app.save_whitelist(["com.example.chat"])
-            
+
             # Run restriction
             skipped = app.restrict_background_apps(level="ignore")
-            
+
             # Assert com.example.chat appears in returned skipped list
             self.assertIn("com.example.chat", skipped)
-            
+
             # Check all calls for mutations of com.example.chat
             for call in mock_run.call_args_list:
                 # Check command line args
@@ -620,7 +696,7 @@ class OptimizerTests(unittest.TestCase):
                 if "com.example.chat" in cmd_str:
                     if "appops" in cmd_str or "set-standby-bucket" in cmd_str:
                         self.fail(f"Whitelisted app com.example.chat was mutated in command line: {cmd_str}")
-                
+
                 # Check input_data (since it's batched)
                 input_data = call[1].get('input', '')
                 if input_data and "com.example.chat" in input_data:
@@ -644,19 +720,19 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
-            
+
             with self.assertRaises(SnapshotError) as cm:
                 with app.recorder.transaction():
                     app.recorder.prefetch_package_states()
                     app.recorder.set_package_enabled("com.unknown.pkg", enabled=False)
-            
+
             self.assertIn("Could not determine enabled state for package: com.unknown.pkg", str(cm.exception))
 
             # Verify no mutation (pm disable) was sent to ADB
             for call in mock_run.call_args_list:
                 args = call[0][0]
                 self.assertFalse("pm" in args and "disable" in args)
-            
+
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
 
@@ -672,19 +748,19 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
-            
+
             with self.assertRaises(SnapshotError) as cm:
                 with app.recorder.transaction():
                     app.recorder.prefetch_package_states()
                     app.recorder.set_appop("com.example.app", "RUN_ANY_IN_BACKGROUND", "ignore")
-            
+
             self.assertIn("AppOps data was not collected or command failed", str(cm.exception))
 
             # Verify no mutation
             for call in mock_run.call_args_list:
                 args = call[0][0]
                 self.assertFalse("appops" in args and "set" in args)
-            
+
             # Verify no state persisted
             self.assertFalse(app.store.has_entries())
 
@@ -695,12 +771,12 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
-            
+
             with self.assertRaises(SnapshotError) as cm:
                 with app.recorder.transaction():
                     app.recorder.prefetch_package_states()
                     app.recorder.set_standby_bucket("com.missing.pkg", "rare")
-            
+
             self.assertIn("Could not determine standby bucket for package: com.missing.pkg", str(cm.exception))
 
             # Verify no mutation

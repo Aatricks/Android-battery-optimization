@@ -97,6 +97,10 @@ class StateRecorder:
         else:
             self.client.shell(args, mutate=True)
 
+    def _restore_appop_value(self, package: str, op: str, prior_value: Optional[str]) -> None:
+        value = "default" if prior_value is None else str(prior_value)
+        self.client.shell(["cmd", "appops", "set", package, op, value], mutate=True)
+
     def _revert_ledger(self, successful_indices: Optional[List[int]] = None) -> None:
         entries_to_revert = []
         if successful_indices is not None:
@@ -117,10 +121,10 @@ class StateRecorder:
                 msg = f"Rollback failed for {entry}: {exc}"
                 self.client.output(msg)
                 self._persist_failed_rollback(entry)
-                
+
         if had_failures:
             self.client.output("Warning: Partial state corruption due to rollback failures.")
-        
+
         self.store.save()
 
     def _perform_rollback(self, entry: Dict[str, object]) -> None:
@@ -145,10 +149,7 @@ class StateRecorder:
             package = str(entry["package"])
             op = str(entry["op"])
             prior_value = entry["prior_value"]
-            if prior_value == "default" or prior_value is None:
-                self.client.shell(["cmd", "appops", "reset", package, op], mutate=True)
-            else:
-                self.client.shell(["cmd", "appops", "set", package, op, prior_value], mutate=True)
+            self._restore_appop_value(package, op, prior_value)
         elif type_ == "standby_bucket":
             package = str(entry["package"])
             prior_value = entry["prior_value"]
@@ -281,7 +282,7 @@ class StateRecorder:
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
             raise SnapshotError(f"Failed to list settings in {namespace}: {err}")
-        
+
         cache = {}
         for line in result.stdout.splitlines():
             if "=" in line:
@@ -342,7 +343,7 @@ class StateRecorder:
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
             raise SnapshotError(f"Failed to list device_config in {namespace}: {err}")
-        
+
         cache = {}
         for line in result.stdout.splitlines():
             if "=" in line:
@@ -543,22 +544,49 @@ class StateRecorder:
                 f"read command failed with exit code {result.returncode}"
             )
         output = result.stdout.strip()
-        match = re.search(r"mode[:=]\s*(\w+)", output)
-        if match:
-            actual = match.group(1)
-        elif "No overrides" in output:
-            actual = "default"
-        else:
-            raise VerificationError(
-                f"Verification failed for appop {op} for package {package}: "
-                f"could not parse command output: {output}"
-            )
+        actual = self._parse_appop_output(output)
+        expected = self._normalize_value(expected_value)
+        if expected is not None:
+            expected = expected.lower()
 
-        if actual != expected_value:
+        if expected == "default":
+            if actual not in {"default", "no operations.", "no overrides."}:
+                raise VerificationError(
+                    f"Verification failed for appop {op} for package {package}: "
+                    f"expected default, got {actual}"
+                )
+            return
+
+        if actual != expected:
             raise VerificationError(
                 f"Verification failed for appop {op} for package {package}: "
                 f"expected {expected_value}, got {actual}"
             )
+
+    def _parse_appop_output(self, output: str) -> str:
+        normalized_output = output.strip()
+        if not normalized_output:
+            raise VerificationError(f"Verification failed for appop: could not parse command output: {output}")
+
+        if normalized_output in {"No operations.", "No overrides."}:
+            return "default"
+
+        for line in normalized_output.splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if candidate in {"No operations.", "No overrides."}:
+                return "default"
+            match = re.match(
+                r"^(?:(?:[A-Z_a-z0-9]+)\s*:\s*)?(?:mode\s*[:=]\s*)?(?P<value>[A-Za-z0-9_]+)(?:\s*;.*)?$",
+                candidate,
+            )
+            if match:
+                return match.group("value").lower()
+
+        raise VerificationError(
+            f"Verification failed for appop: could not parse command output: {output}"
+        )
 
     def verify_standby_bucket(self, package: str, expected_bucket: str) -> None:
         if self.client.dry_run:
@@ -622,14 +650,14 @@ class StateRecorder:
         # Refuse restore on device mismatch
         current_metadata = self.client.get_device_metadata()
         saved_device = self.store.data.get("device", {})
-        
+
         if saved_device:
             if current_metadata["serial"] != saved_device.get("serial"):
                 raise ValueError(
                     f"Device serial mismatch: current={current_metadata['serial']}, "
                     f"saved={saved_device.get('serial')}"
                 )
-            
+
             current_fp = current_metadata.get("fingerprint")
             saved_fp = saved_device.get("fingerprint")
             if current_fp and saved_fp and current_fp != saved_fp:
@@ -683,16 +711,7 @@ class StateRecorder:
         for package, item in self.store.data["packages"].items():
             for op, value in item["appops"].items():
                 try:
-                    if value == "default":
-                        self.client.shell(
-                            ["cmd", "appops", "reset", package, op],
-                            mutate=True,
-                        )
-                    else:
-                        self.client.shell(
-                            ["cmd", "appops", "set", package, op, value],
-                            mutate=True,
-                        )
+                    self._restore_appop_value(package, op, value)
                     messages.append(f"Restored {package} appop {op}")
                 except CommandError as exc:
                     had_failures = True

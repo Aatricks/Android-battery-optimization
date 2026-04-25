@@ -41,6 +41,41 @@ class TestVerificationSafety(unittest.TestCase):
         with self.assertRaises(VerificationError):
             self.recorder.verify_appop("pkg", "op", "allow")
 
+    def test_verify_appop_parses_op_colon_mode(self):
+        self.mock_runner.run.return_value = CommandResult(
+            returncode=0,
+            stdout="RUN_ANY_IN_BACKGROUND: ignore",
+            stderr="",
+        )
+        self.recorder.verify_appop("pkg", "RUN_ANY_IN_BACKGROUND", "ignore")
+
+    def test_verify_appop_parses_op_colon_mode_with_metadata(self):
+        self.mock_runner.run.return_value = CommandResult(
+            returncode=0,
+            stdout="RUN_ANY_IN_BACKGROUND: ignore; time=12345",
+            stderr="",
+        )
+        self.recorder.verify_appop("pkg", "RUN_ANY_IN_BACKGROUND", "ignore")
+
+    def test_verify_appop_accepts_no_operations_for_default(self):
+        for output in ("No operations.", "No overrides."):
+            with self.subTest(output=output):
+                self.mock_runner.run.return_value = CommandResult(
+                    returncode=0,
+                    stdout=output,
+                    stderr="",
+                )
+                self.recorder.verify_appop("pkg", "op", "default")
+
+    def test_verify_appop_rejects_no_operations_for_non_default(self):
+        self.mock_runner.run.return_value = CommandResult(
+            returncode=0,
+            stdout="No operations.",
+            stderr="",
+        )
+        with self.assertRaises(VerificationError):
+            self.recorder.verify_appop("pkg", "op", "allow")
+
     def test_verify_standby_bucket_read_failure_raises_verification_error(self):
         self.mock_runner.run.return_value = CommandResult(returncode=1, stdout="", stderr="error")
         with self.assertRaises(VerificationError):

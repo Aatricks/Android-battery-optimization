@@ -192,7 +192,7 @@ class StateStore:
         if getattr(self, "_in_transaction", False):
             self._pending_save = True
             return
-        
+
         if not self.path:
             return
 
