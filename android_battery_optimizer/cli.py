@@ -26,6 +26,34 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=str(DEFAULT_STATE_DIR),
         help="Directory for whitelist and saved rollback state",
     )
+
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+
+    subparsers.add_parser("status", help="Checks ADB environment and device info")
+    subparsers.add_parser("apply-safe", help="Applies documented safe optimizations")
+
+    parser_exp = subparsers.add_parser("apply-experimental", help="Applies experimental optimizations")
+    parser_exp.add_argument("--yes", action="store_true", help="Confirm experimental optimizations")
+
+    parser_sam = subparsers.add_parser(
+        "apply-samsung-experimental", help="Applies Samsung experimental optimizations"
+    )
+    parser_sam.add_argument("--yes", action="store_true", help="Confirm Samsung experimental optimizations")
+
+    parser_restrict = subparsers.add_parser("restrict-apps", help="Restrict background apps")
+    parser_restrict.add_argument("--level", choices=["ignore", "deny", "allow"], default="ignore")
+    parser_restrict.add_argument("--yes", action="store_true", help="Confirm restriction")
+
+    subparsers.add_parser("revert", help="Reverts saved state for selected serial")
+
+    parser_wl = subparsers.add_parser("whitelist", help="Manage whitelist")
+    wl_sub = parser_wl.add_subparsers(dest="wl_command")
+    wl_sub.add_parser("list", help="List whitelisted apps")
+    parser_wl_add = wl_sub.add_parser("add", help="Add app to whitelist")
+    parser_wl_add.add_argument("package", help="Package name")
+    parser_wl_remove = wl_sub.add_parser("remove", help="Remove app from whitelist")
+    parser_wl_remove.add_argument("package", help="Package name")
+
     return parser.parse_args(argv)
 
 class BatteryOptimizerCLI:
@@ -184,6 +212,93 @@ class BatteryOptimizerCLI:
             else:
                 self.output("Invalid selection.")
 
+    def run_command(self, args: argparse.Namespace) -> int:
+        if not self.check_environment():
+            return 1
+
+        try:
+            if args.command == "status":
+                self.output(f"Selected device: {self.client.serial}")
+                self.output(f"Device info: {self.app.get_device_info()}")
+                has_rollback = self.app.store.has_entries()
+                self.output(f"Rollback state exists: {has_rollback}")
+                return 0
+
+            elif args.command == "apply-safe":
+                self.output("Applying documented safe optimizations...")
+                self.app.apply_documented_safe_optimizations()
+                self.output("Applied abusive-app auto restriction tracking from AOSP documentation.")
+                return 0
+
+            elif args.command == "apply-experimental":
+                if not args.yes:
+                    self.output("Error: --yes is required for experimental optimizations in non-interactive mode.")
+                    return 1
+                self.output("Applying experimental optimizations...")
+                self.app.apply_experimental_optimizations()
+                self.output("Experimental optimizations applied.")
+                return 0
+
+            elif args.command == "apply-samsung-experimental":
+                if not args.yes:
+                    self.output("Error: --yes is required for Samsung experimental optimizations in non-interactive mode.")
+                    return 1
+                self.output("Applying Samsung experimental optimizations...")
+                self.app.apply_samsung_experimental_optimizations()
+                self.output("Samsung experimental optimizations applied.")
+                return 0
+
+            elif args.command == "restrict-apps":
+                if not args.yes and not args.dry_run:
+                    self.output("Error: --yes is required for restricting apps unless --dry-run is used.")
+                    return 1
+                self.output(f"Setting RUN_ANY_IN_BACKGROUND={args.level} for third-party apps...")
+                skipped = self.app.restrict_background_apps(level=args.level)
+                for pkg in skipped:
+                    self.output(f"  Skipping whitelisted app: {pkg}")
+                self.output("Background restrictions updated.")
+                return 0
+
+            elif args.command == "revert":
+                self.output("Restoring saved state...")
+                messages = self.app.revert_saved_state()
+                if not messages:
+                    self.output("No saved state found to restore.")
+                else:
+                    for msg in messages:
+                        self.output(f"  {msg}")
+                    self.output("Restore finished.")
+                return 0
+
+            elif args.command == "whitelist":
+                whitelist = self.app.load_whitelist()
+                if args.wl_command == "list":
+                    if not whitelist:
+                        self.output("Whitelist is empty.")
+                    for pkg in whitelist:
+                        self.output(pkg)
+                elif args.wl_command == "add":
+                    if args.package not in whitelist:
+                        whitelist.append(args.package)
+                        whitelist.sort()
+                        self.app.save_whitelist(whitelist)
+                        self.output(f"Added {args.package} to whitelist.")
+                    else:
+                        self.output(f"{args.package} is already whitelisted.")
+                elif args.wl_command == "remove":
+                    if args.package in whitelist:
+                        whitelist.remove(args.package)
+                        self.app.save_whitelist(whitelist)
+                        self.output(f"Removed {args.package} from whitelist.")
+                    else:
+                        self.output(f"{args.package} not found in whitelist.")
+                return 0
+
+        except (CommandError, ValueError, SnapshotError, VerificationError) as exc:
+            self.output(f"Error: {exc}")
+            return 1
+        return 0
+
     def run(self) -> int:
         if not self.check_environment():
             return 1
@@ -271,7 +386,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     app = BatteryOptimizerApp(client=client, state_dir=state_dir)
     cli = BatteryOptimizerCLI(app=app)
+    if args.command:
+        return cli.run_command(args)
     return cli.run()
+
 
 if __name__ == "__main__":
     sys.exit(main())
