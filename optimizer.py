@@ -27,6 +27,10 @@ class CommandError(RuntimeError):
         self.result = result
 
 
+class SnapshotError(RuntimeError):
+    pass
+
+
 @dataclass
 class CommandResult:
     returncode: int
@@ -327,6 +331,9 @@ class StateRecorder:
         self._standby_bucket_cache: Dict[str, str] = {}
         self._package_enabled_cache: Dict[str, bool] = {}
         self._ledger: List[Dict[str, object]] = []
+        self._prefetch_package_enabled_success = False
+        self._prefetch_appops_success = False
+        self._prefetch_standby_bucket_success = False
 
     @staticmethod
     def _normalize_value(value: Optional[str]) -> Optional[str]:
@@ -487,42 +494,46 @@ class StateRecorder:
 
     def prefetch_package_states(self) -> None:
         try:
-            disabled = self.client.shell_text(["pm", "list", "packages", "-d"], check=False)
-            enabled = self.client.shell_text(["pm", "list", "packages", "-e"], check=False)
+            disabled = self.client.shell_text(["pm", "list", "packages", "-d"])
+            enabled = self.client.shell_text(["pm", "list", "packages", "-e"])
             for line in disabled.splitlines():
                 if ":" in line:
                     self._package_enabled_cache[line.split(":", 1)[1].strip()] = False
             for line in enabled.splitlines():
                 if ":" in line:
                     self._package_enabled_cache[line.split(":", 1)[1].strip()] = True
+            self._prefetch_package_enabled_success = True
         except CommandError:
-            pass
+            self._prefetch_package_enabled_success = False
 
         try:
-            appops = self.client.shell_text(["dumpsys", "appops"], check=False)
+            appops = self.client.shell_text(["dumpsys", "appops"])
             current_pkg = None
             for line in appops.splitlines():
                 pkg_match = re.search(r"Package\s+([a-zA-Z0-9_\.]+):", line)
                 if pkg_match:
                     current_pkg = pkg_match.group(1)
+                    self._appops_cache.setdefault(current_pkg, {})
                     continue
                 if current_pkg:
                     op_match = re.search(r"\s+([A-Z_a-z0-9]+):\s*([a-zA-Z0-9_]+)", line)
                     if op_match:
                         self._appops_cache.setdefault(current_pkg, {})[op_match.group(1)] = op_match.group(2)
+            self._prefetch_appops_success = True
         except CommandError:
-            pass
+            self._prefetch_appops_success = False
 
         try:
-            usagestats = self.client.shell_text(["dumpsys", "usagestats"], check=False)
+            usagestats = self.client.shell_text(["dumpsys", "usagestats"])
             for line in usagestats.splitlines():
                 if "package=" in line and "bucket=" in line:
                     pkg_match = re.search(r"package=([a-zA-Z0-9_\.]+)", line)
                     bucket_match = re.search(r"bucket=(\d+|[a-zA-Z_]+)", line)
                     if pkg_match and bucket_match:
                         self._standby_bucket_cache[pkg_match.group(1)] = bucket_match.group(1)
+            self._prefetch_standby_bucket_success = True
         except CommandError:
-            pass
+            self._prefetch_standby_bucket_success = False
 
     def _get_setting(self, namespace: str, key: str) -> Optional[str]:
         if namespace not in self._settings_cache:
@@ -618,7 +629,9 @@ class StateRecorder:
         )
 
     def _get_package_enabled(self, package: str) -> bool:
-        return self._package_enabled_cache.get(package, True)
+        if not self._prefetch_package_enabled_success or package not in self._package_enabled_cache:
+            raise SnapshotError(f"Could not determine enabled state for package: {package}")
+        return self._package_enabled_cache[package]
 
     def snapshot_package_enabled(self, package: str) -> None:
         entry = self._package_entry(package)
@@ -633,7 +646,11 @@ class StateRecorder:
         })
 
     def _get_appop(self, package: str, op: str) -> str:
-        return self._appops_cache.get(package, {}).get(op, "default")
+        if not self._prefetch_appops_success:
+            raise SnapshotError(f"AppOps data was not collected or command failed for package: {package}")
+        if package not in self._appops_cache:
+             raise SnapshotError(f"Could not determine appops for package: {package}")
+        return self._appops_cache[package].get(op, "default")
 
     def snapshot_appop(self, package: str, op: str) -> None:
         entry = self._package_entry(package)
@@ -649,7 +666,9 @@ class StateRecorder:
         })
 
     def _get_standby_bucket(self, package: str) -> str:
-        return self._standby_bucket_cache.get(package, "active")
+        if not self._prefetch_standby_bucket_success or package not in self._standby_bucket_cache:
+            raise SnapshotError(f"Could not determine standby bucket for package: {package}")
+        return self._standby_bucket_cache[package]
 
     def snapshot_standby_bucket(self, package: str) -> None:
         entry = self._package_entry(package)
@@ -1250,7 +1269,7 @@ class BatteryOptimizerCLI:
                     return 0
                 else:
                     self.output("Invalid selection.")
-            except (CommandError, ValueError) as exc:
+            except (CommandError, ValueError, SnapshotError) as exc:
                 self.output(f"Error: {exc}")
 
 

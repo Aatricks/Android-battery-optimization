@@ -13,6 +13,7 @@ from optimizer import (
     CommandResult,
     StateRecorder,
     StateStore,
+    SnapshotError,
     parse_adb_devices,
     resolve_package_choice,
     SubprocessRunner,
@@ -591,6 +592,10 @@ class OptimizerTests(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
             if "pm list packages" in cmd and "-3" not in cmd:
                 return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
+            if "dumpsys appops" in cmd:
+                return MagicMock(returncode=0, stdout="Package com.example.music:\n  RUN_ANY_IN_BACKGROUND: allow\n", stderr="")
+            if "dumpsys usagestats" in cmd:
+                return MagicMock(returncode=0, stdout="package=com.example.music bucket=active\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
         mock_run.side_effect = side_effect
 
@@ -631,6 +636,80 @@ class OptimizerTests(unittest.TestCase):
                         mutation_found = True
                         break
             self.assertTrue(mutation_found, "com.example.music was not mutated")
+
+    @patch("optimizer.subprocess.run")
+    def test_unknown_package_enabled_state_blocks_mutation(self, mock_run):
+        # Simulate package NOT present in enabled/disabled lists
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            
+            with self.assertRaises(SnapshotError) as cm:
+                with app.recorder.transaction():
+                    app.recorder.prefetch_package_states()
+                    app.recorder.set_package_enabled("com.unknown.pkg", enabled=False)
+            
+            self.assertIn("Could not determine enabled state for package: com.unknown.pkg", str(cm.exception))
+
+            # Verify no mutation (pm disable) was sent to ADB
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                self.assertFalse("pm" in args and "disable" in args)
+            
+            # Verify no state persisted
+            self.assertFalse(app.store.has_entries())
+
+    @patch("optimizer.subprocess.run")
+    def test_appop_snapshot_failure_blocks_mutation(self, mock_run):
+        # Simulate appops command failure
+        def side_effect(args, **kwargs):
+            if "dumpsys appops" in " ".join(args):
+                return MagicMock(returncode=1, stdout="", stderr="error")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            
+            with self.assertRaises(SnapshotError) as cm:
+                with app.recorder.transaction():
+                    app.recorder.prefetch_package_states()
+                    app.recorder.set_appop("com.example.app", "RUN_ANY_IN_BACKGROUND", "ignore")
+            
+            self.assertIn("AppOps data was not collected or command failed", str(cm.exception))
+
+            # Verify no mutation
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                self.assertFalse("appops" in args and "set" in args)
+            
+            # Verify no state persisted
+            self.assertFalse(app.store.has_entries())
+
+    @patch("optimizer.subprocess.run")
+    def test_standby_bucket_snapshot_failure_blocks_mutation(self, mock_run):
+        # Simulate usagestats output missing the package
+        mock_run.return_value = MagicMock(returncode=0, stdout="some other output\n", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            
+            with self.assertRaises(SnapshotError) as cm:
+                with app.recorder.transaction():
+                    app.recorder.prefetch_package_states()
+                    app.recorder.set_standby_bucket("com.missing.pkg", "rare")
+            
+            self.assertIn("Could not determine standby bucket for package: com.missing.pkg", str(cm.exception))
+
+            # Verify no mutation
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                self.assertFalse("set-standby-bucket" in args)
+
+            # Verify no state persisted
+            self.assertFalse(app.store.has_entries())
 
 
 if __name__ == "__main__":
