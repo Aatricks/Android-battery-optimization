@@ -14,44 +14,51 @@ DEFAULT_STATE_DIR = (
 )
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Android battery optimizer")
-    parser.add_argument("--serial", help="ADB device serial to use")
-    parser.add_argument(
+    # Parent parser for global options
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("--serial", help="ADB device serial to use")
+    parent_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print mutating adb commands instead of executing them",
     )
-    parser.add_argument(
+    parent_parser.add_argument(
         "--state-dir",
         default=str(DEFAULT_STATE_DIR),
         help="Directory for whitelist and saved rollback state",
     )
 
+    parser = argparse.ArgumentParser(
+        description="Android battery optimizer", parents=[parent_parser]
+    )
     subparsers = parser.add_subparsers(dest="command", help="Subcommands")
 
-    subparsers.add_parser("status", help="Checks ADB environment and device info")
-    subparsers.add_parser("apply-safe", help="Applies documented safe optimizations")
+    def add_subparser(name, **kwargs):
+        return subparsers.add_parser(name, parents=[parent_parser], **kwargs)
 
-    parser_exp = subparsers.add_parser("apply-experimental", help="Applies experimental optimizations")
+    add_subparser("status", help="Checks ADB environment and device info")
+    add_subparser("apply-safe", help="Applies documented safe optimizations")
+
+    parser_exp = add_subparser("apply-experimental", help="Applies experimental optimizations")
     parser_exp.add_argument("--yes", action="store_true", help="Confirm experimental optimizations")
 
-    parser_sam = subparsers.add_parser(
-        "apply-samsung-experimental", help="Applies Samsung experimental optimizations"
-    )
+    parser_sam = add_subparser("apply-samsung-experimental", help="Applies Samsung experimental optimizations")
     parser_sam.add_argument("--yes", action="store_true", help="Confirm Samsung experimental optimizations")
 
-    parser_restrict = subparsers.add_parser("restrict-apps", help="Restrict background apps")
+    parser_restrict = add_subparser("restrict-apps", help="Restrict background apps")
     parser_restrict.add_argument("--level", choices=["ignore", "deny", "allow"], default="ignore")
     parser_restrict.add_argument("--yes", action="store_true", help="Confirm restriction")
 
-    subparsers.add_parser("revert", help="Reverts saved state for selected serial")
+    add_subparser("revert", help="Reverts saved state for selected serial")
 
-    parser_wl = subparsers.add_parser("whitelist", help="Manage whitelist")
+    parser_wl = add_subparser("whitelist", help="Manage whitelist")
     wl_sub = parser_wl.add_subparsers(dest="wl_command")
-    wl_sub.add_parser("list", help="List whitelisted apps")
-    parser_wl_add = wl_sub.add_parser("add", help="Add app to whitelist")
+    wl_sub.add_parser("list", help="List whitelisted apps", parents=[parent_parser])
+    
+    parser_wl_add = wl_sub.add_parser("add", help="Add app to whitelist", parents=[parent_parser])
     parser_wl_add.add_argument("package", help="Package name")
-    parser_wl_remove = wl_sub.add_parser("remove", help="Remove app from whitelist")
+    
+    parser_wl_remove = wl_sub.add_parser("remove", help="Remove app from whitelist", parents=[parent_parser])
     parser_wl_remove.add_argument("package", help="Package name")
 
     return parser.parse_args(argv)
