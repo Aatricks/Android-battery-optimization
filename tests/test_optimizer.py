@@ -75,6 +75,149 @@ class OptimizerTests(unittest.TestCase):
                 app3.recorder.put_setting("global", "test", "3")
             self.assertTrue(state_file_3.exists())
 
+    def test_whitelist_is_scoped_by_serial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            app1, _, _ = self.make_app_and_cli(tmp_path)
+            app1.client.serial = "serial-1"
+            app1.rebind_device()
+            app1.save_whitelist(["com.example.alpha"])
+
+            app2, _, _ = self.make_app_and_cli(tmp_path)
+            app2.client.serial = "serial-2"
+            app2.rebind_device()
+
+            whitelist_1 = tmp_path / "devices" / "serial-1" / "whitelist.txt"
+            whitelist_2 = tmp_path / "devices" / "serial-2" / "whitelist.txt"
+            legacy_whitelist = tmp_path / "whitelist.txt"
+
+            self.assertTrue(whitelist_1.exists())
+            self.assertFalse(legacy_whitelist.exists())
+            self.assertFalse(whitelist_2.exists())
+            self.assertEqual(app1.load_whitelist(), ["com.example.alpha"])
+            self.assertEqual(app2.load_whitelist(), [])
+
+    def test_rebind_device_changes_whitelist_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _, _ = self.make_app_and_cli(tmp_path)
+
+            app.client.serial = "serial:one"
+            first_path = app.whitelist_path
+            app.client.serial = "serial/two"
+            app.rebind_device()
+            second_path = app.whitelist_path
+
+            self.assertEqual(first_path, tmp_path / "devices" / "serial_one" / "whitelist.txt")
+            self.assertEqual(second_path, tmp_path / "devices" / "serial_two" / "whitelist.txt")
+            self.assertNotEqual(first_path, second_path)
+
+    def test_old_global_whitelist_is_migrated_for_selected_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            legacy_whitelist = tmp_path / "whitelist.txt"
+            legacy_whitelist.write_text("com.example.legacy\n", encoding="utf-8")
+
+            outputs = []
+            client = AdbClient(runner=SubprocessRunner(), serial="serial-1", output=outputs.append)
+            app = BatteryOptimizerApp(client=client, state_dir=tmp_path)
+
+            self.assertEqual(app.load_whitelist(), ["com.example.legacy"])
+
+            migrated_whitelist = tmp_path / "devices" / "serial-1" / "whitelist.txt"
+            self.assertTrue(migrated_whitelist.exists())
+            self.assertEqual(
+                migrated_whitelist.read_text(encoding="utf-8"),
+                legacy_whitelist.read_text(encoding="utf-8"),
+            )
+            self.assertTrue(any("Migrated legacy whitelist.txt" in message for message in outputs))
+
+            app.load_whitelist()
+            migration_messages = [message for message in outputs if "Migrated legacy whitelist.txt" in message]
+            self.assertEqual(len(migration_messages), 1)
+
+    def test_whitelist_add_for_device_a_does_not_affect_device_b(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            app_a, _, _ = self.make_app_and_cli(tmp_path)
+            app_a.client.serial = "device-a"
+            app_a.rebind_device()
+            app_a.save_whitelist(["com.example.alpha"])
+
+            app_b, _, _ = self.make_app_and_cli(tmp_path)
+            app_b.client.serial = "device-b"
+            app_b.rebind_device()
+            app_b.save_whitelist(["com.example.beta"])
+
+            self.assertEqual(app_a.load_whitelist(), ["com.example.alpha"])
+            self.assertEqual(app_b.load_whitelist(), ["com.example.beta"])
+            self.assertEqual((tmp_path / "devices" / "device-a" / "whitelist.txt").read_text(encoding="utf-8"), "com.example.alpha\n")
+            self.assertEqual((tmp_path / "devices" / "device-b" / "whitelist.txt").read_text(encoding="utf-8"), "com.example.beta\n")
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_restrict_apps_uses_selected_device_whitelist(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "cmd appops help" in cmd:
+                return MagicMock(returncode=0, stdout="help", stderr="")
+            if "getprop ro.build.version.sdk" in cmd:
+                return MagicMock(returncode=0, stdout="30\n", stderr="")
+            if "am get-standby-bucket" in cmd:
+                return MagicMock(returncode=0, stdout="10\n", stderr="")
+            if "pm list packages -3" in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
+            if "pm list packages" in cmd and "-3" not in cmd:
+                return MagicMock(returncode=0, stdout="package:com.example.chat\npackage:com.example.music\n", stderr="")
+            if "dumpsys appops" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "Package com.example.chat:\n"
+                        "  RUN_ANY_IN_BACKGROUND: allow\n"
+                        "Package com.example.music:\n"
+                        "  RUN_ANY_IN_BACKGROUND: allow\n"
+                    ),
+                    stderr="",
+                )
+            if "dumpsys usagestats" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout="package=com.example.chat bucket=active\npackage=com.example.music bucket=active\n",
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            app_a, _, _ = self.make_app_and_cli(tmp_path)
+            app_a.client.serial = "device-a"
+            app_a.rebind_device()
+            app_a.save_whitelist(["com.example.chat"])
+
+            app_b, _, _ = self.make_app_and_cli(tmp_path)
+            app_b.client.serial = "device-b"
+            app_b.rebind_device()
+
+            app_b.restrict_background_apps(level="ignore")
+
+            self.assertEqual(app_b.load_whitelist(), [])
+            self.assertEqual(app_a.load_whitelist(), ["com.example.chat"])
+
+            batched_scripts = [call.kwargs.get("input") for call in mock_run.call_args_list if call.kwargs.get("input")]
+            self.assertTrue(any("com.example.chat" in script for script in batched_scripts))
+            self.assertTrue(any("com.example.music" in script for script in batched_scripts))
+            self.assertFalse(
+                any(
+                    "com.example.chat" in script and "RUN_ANY_IN_BACKGROUND" not in script
+                    for script in batched_scripts
+                )
+            )
+
     @patch("android_battery_optimizer.adb.subprocess.run")
     def test_dry_run_does_not_create_state_file(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")

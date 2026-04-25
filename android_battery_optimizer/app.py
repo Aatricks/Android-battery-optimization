@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import List, Set, Sequence
 from .adb import AdbClient, CommandError
@@ -11,14 +12,42 @@ class BatteryOptimizerApp:
         self.client = client
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.whitelist_path = self.state_dir / WHITELIST_FILE
+        self._whitelist_migration_announced = False
         self.store = StateStore(self.state_dir, client)
         self.recorder = StateRecorder(client, self.store)
 
     def rebind_device(self) -> None:
         self.store.rebind()
 
+    @property
+    def whitelist_path(self) -> Path:
+        serial = self.client.serial or "unknown-device"
+        safe_serial = StateStore.sanitize_serial(serial)
+        return self.state_dir / "devices" / safe_serial / WHITELIST_FILE
+
+    @property
+    def legacy_whitelist_path(self) -> Path:
+        return self.state_dir / WHITELIST_FILE
+
+    def _migrate_legacy_whitelist_if_needed(self) -> None:
+        current_path = self.whitelist_path
+        if current_path.exists():
+            return
+
+        legacy_path = self.legacy_whitelist_path
+        if not legacy_path.exists():
+            return
+
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_path, current_path)
+        if not self._whitelist_migration_announced:
+            self.client.output(
+                f"Migrated legacy whitelist.txt to {current_path}."
+            )
+            self._whitelist_migration_announced = True
+
     def load_whitelist(self) -> List[str]:
+        self._migrate_legacy_whitelist_if_needed()
         if not self.whitelist_path.exists():
             return []
         with self.whitelist_path.open("r", encoding="utf-8") as handle:
@@ -26,6 +55,8 @@ class BatteryOptimizerApp:
 
     def save_whitelist(self, packages: Sequence[str]) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_whitelist_if_needed()
+        self.whitelist_path.parent.mkdir(parents=True, exist_ok=True)
         with self.whitelist_path.open("w", encoding="utf-8") as handle:
             for package in packages:
                 handle.write(f"{package}\n")

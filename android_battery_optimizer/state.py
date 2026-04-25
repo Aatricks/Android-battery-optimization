@@ -4,12 +4,17 @@ import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, cast
 from .adb import AdbClient, CommandError
 
 SNAPSHOT_FILE = "state.json"
 
 class StateStore:
+    @staticmethod
+    def sanitize_serial(serial: str) -> str:
+        # Keep only A-Z, a-z, 0-9, dot, underscore, hyphen. Replace others with "_"
+        return re.sub(r"[^A-Za-z0-9._-]", "_", serial)
+
     def __init__(self, base_state_dir: Path, client: AdbClient) -> None:
         self.base_state_dir = base_state_dir
         self.client = client
@@ -28,13 +33,9 @@ class StateStore:
             "packages": {},
         }
 
-    def _sanitize_serial(self, serial: str) -> str:
-        # Keep only A-Z, a-z, 0-9, dot, underscore, hyphen. Replace others with "_"
-        return re.sub(r"[^A-Za-z0-9._-]", "_", serial)
-
     def rebind(self) -> None:
         serial = self.client.serial or "unknown-device"
-        safe_serial = self._sanitize_serial(serial)
+        safe_serial = self.sanitize_serial(serial)
         device_dir = self.base_state_dir / "devices" / safe_serial
         self.path = device_dir / SNAPSHOT_FILE
         self.data = self._load()
@@ -56,7 +57,7 @@ class StateStore:
         value = state.get(key)
         if not isinstance(value, dict):
             raise ValueError(f"State field '{key}' must be an object.")
-        return value
+        return cast(dict[str, object], value)
 
     def _validate_scalar_kv_section(
         self,
@@ -68,6 +69,7 @@ class StateStore:
                 raise ValueError(
                     f"State section '{section_name}' entry '{snapshot_key}' must be an object."
                 )
+            item = cast(dict[str, object], item)
             for required_key in ("namespace", "key", "value"):
                 if required_key not in item:
                     raise ValueError(
@@ -92,6 +94,7 @@ class StateStore:
                 raise ValueError("State packages keys must be strings.")
             if not isinstance(item, dict):
                 raise ValueError(f"State packages entry '{package}' must be an object.")
+            item = cast(dict[str, object], item)
 
             for required_key in ("appops", "standby_bucket", "enabled"):
                 if required_key not in item:
@@ -125,6 +128,7 @@ class StateStore:
     def _normalize_state(self, raw: object) -> dict[str, object]:
         if not isinstance(raw, dict):
             raise ValueError("State root must be an object.")
+        raw = cast(dict[str, object], raw)
 
         version = raw.get("version", 2)
         if not isinstance(version, int) or isinstance(version, bool):
