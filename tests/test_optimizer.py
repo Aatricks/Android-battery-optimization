@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,129 @@ class OptimizerTests(unittest.TestCase):
             input_fn=fake_input,
         )
         return app, cli, outputs
+
+    @patch("optimizer.subprocess.run")
+    def test_state_is_scoped_by_serial(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            
+            # Serial 1
+            app1, _, _ = self.make_app_and_cli(tmp_path)
+            app1.client.serial = "serial-1"
+            app1.rebind_device()
+            with app1.recorder.transaction():
+                app1.recorder.put_setting("global", "test", "1")
+            
+            state_file_1 = tmp_path / "devices" / "serial-1" / "state.json"
+            self.assertTrue(state_file_1.exists())
+            
+            # Serial 2
+            app2, _, _ = self.make_app_and_cli(tmp_path)
+            app2.client.serial = "serial-2"
+            app2.rebind_device()
+            self.assertFalse(app2.store.has_entries())
+            
+            with app2.recorder.transaction():
+                app2.recorder.put_setting("global", "test", "2")
+            
+            state_file_2 = tmp_path / "devices" / "serial-2" / "state.json"
+            self.assertTrue(state_file_2.exists())
+            
+            # Sanitize test
+            app3, _, _ = self.make_app_and_cli(tmp_path)
+            app3.client.serial = "serial:3/path"
+            app3.rebind_device()
+            state_file_3 = tmp_path / "devices" / "serial_3_path" / "state.json"
+            with app3.recorder.transaction():
+                app3.recorder.put_setting("global", "test", "3")
+            self.assertTrue(state_file_3.exists())
+
+    @patch("optimizer.subprocess.run")
+    def test_dry_run_does_not_create_state_file(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.client.dry_run = True
+            app.rebind_device()
+            
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "test", "1")
+            
+            self.assertFalse((Path(tmp) / "devices").exists())
+
+    @patch("optimizer.subprocess.run")
+    def test_restore_refuses_device_mismatch(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "getprop" in cmd:
+                if "serial-1" in self.current_serial:
+                    return MagicMock(returncode=0, stdout="val1\n", stderr="")
+                return MagicMock(returncode=0, stdout="val2\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            
+            self.current_serial = "serial-1"
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            
+            with app.recorder.transaction():
+                app.recorder.put_setting("global", "test", "1")
+            
+            # Switch serial
+            self.current_serial = "serial-2"
+            app.client.serial = "serial-2"
+            # Manually point store back to serial-1 to simulate loading it
+            app.store.path = Path(tmp) / "devices" / "serial-1" / "state.json"
+            app.store.data = app.store._load()
+            
+            with self.assertRaises(ValueError) as cm:
+                app.revert_saved_state()
+            self.assertIn("Device serial mismatch", str(cm.exception))
+            
+            # Ensure no restore ADB command was run (except getprop)
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                if "settings" in args and "put" in args:
+                    self.fail("ADB restore command run on mismatched device")
+
+    @patch("optimizer.subprocess.run")
+    def test_corrupt_state_file_is_quarantined(self, mock_run):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            serial_dir = tmp_path / "devices" / "serial-1"
+            serial_dir.mkdir(parents=True)
+            state_file = serial_dir / "state.json"
+            with state_file.open("w") as f:
+                f.write("{invalid json")
+            
+            app, _, _ = self.make_app_and_cli(tmp_path)
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            
+            self.assertEqual(app.store.data["settings"], {})
+            self.assertTrue(any(f.name.startswith("state.json.corrupt.") for f in serial_dir.iterdir()))
+
+    @patch("optimizer.subprocess.run")
+    def test_state_save_is_atomic(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            
+            app.store.save()
+            state_file = Path(tmp) / "devices" / "serial-1" / "state.json"
+            self.assertTrue(state_file.exists())
+            self.assertFalse(state_file.with_suffix(".tmp").exists())
+            
+            with state_file.open("r") as f:
+                data = json.load(f)
+                self.assertEqual(data["version"], 2)
 
     def test_parse_adb_devices(self):
         devices = parse_adb_devices(
@@ -210,13 +334,14 @@ class OptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, _, outputs = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
+            app.rebind_device()
 
             with app.recorder.transaction():
                 app.recorder.put_setting("global", "window_animation_scale", "0.5")
 
             messages = app.revert_saved_state()
             self.assertTrue(any("Failed to restore setting global/window_animation_scale" in m for m in messages))
-            self.assertTrue((Path(tmp) / "state.json").exists())
+            self.assertTrue((Path(tmp) / "devices" / "serial-1" / "state.json").exists())
             self.assertTrue(any("Partial state corruption" in out for out in outputs))
 
     @patch("optimizer.subprocess.run")
@@ -267,9 +392,11 @@ class OptimizerTests(unittest.TestCase):
 
     @patch("optimizer.subprocess.run")
     def test_no_rollback_if_not_dispatched(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             app, _, _ = self.make_app_and_cli(Path(tmp))
             app.client.serial = "serial-1"
+            app.rebind_device()
 
             try:
                 with app.recorder.transaction():

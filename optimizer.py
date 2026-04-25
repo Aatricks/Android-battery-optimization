@@ -67,6 +67,29 @@ class AdbClient:
         self.dry_run = dry_run
         self.output = output
 
+    def get_device_metadata(self) -> Dict[str, str]:
+        metadata = {
+            "serial": self.serial or "unknown-device",
+            "brand": "",
+            "model": "",
+            "android_release": "",
+            "sdk": "",
+            "fingerprint": "",
+        }
+        props = {
+            "brand": "ro.product.brand",
+            "model": "ro.product.model",
+            "android_release": "ro.build.version.release",
+            "sdk": "ro.build.version.sdk",
+            "fingerprint": "ro.build.fingerprint",
+        }
+        for key, prop in props.items():
+            try:
+                metadata[key] = self.shell_text(["getprop", prop], check=False)
+            except Exception:
+                pass
+        return metadata
+
     def adb_exists(self) -> bool:
         return self.runner.which("adb") is not None
 
@@ -119,24 +142,51 @@ class AdbClient:
 
 
 class StateStore:
-    def __init__(self, state_dir: Path) -> None:
-        self.state_dir = state_dir
-        self.path = state_dir / SNAPSHOT_FILE
-        self.data = self._load()
+    def __init__(self, base_state_dir: Path, client: AdbClient) -> None:
+        self.base_state_dir = base_state_dir
+        self.client = client
+        self.path: Optional[Path] = None
+        self.data: Dict[str, object] = self._empty_state()
         self._in_transaction = False
         self._pending_save = False
+        self.rebind()
+
+    def _empty_state(self) -> Dict[str, object]:
+        return {
+            "version": 2,
+            "device": {},
+            "settings": {},
+            "device_config": {},
+            "packages": {},
+        }
+
+    def _sanitize_serial(self, serial: str) -> str:
+        # Keep only A-Z, a-z, 0-9, dot, underscore, hyphen. Replace others with "_"
+        return re.sub(r"[^A-Za-z0-9._-]", "_", serial)
+
+    def rebind(self) -> None:
+        serial = self.client.serial or "unknown-device"
+        safe_serial = self._sanitize_serial(serial)
+        device_dir = self.base_state_dir / "devices" / safe_serial
+        self.path = device_dir / SNAPSHOT_FILE
+        self.data = self._load()
 
     def _load(self) -> Dict[str, object]:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            return {
-                "version": 1,
-                "settings": {},
-                "device_config": {},
-                "packages": {},
-            }
-        with self.path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+        if not self.path or not self.path.exists():
+            return self._empty_state()
+
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (json.JSONDecodeError, ValueError):
+            import time
+            timestamp = int(time.time())
+            corrupt_path = self.path.with_name(f"{SNAPSHOT_FILE}.corrupt.{timestamp}")
+            try:
+                os.replace(self.path, corrupt_path)
+            except OSError:
+                pass
+            return self._empty_state()
 
     @contextmanager
     def transaction(self):
@@ -150,25 +200,39 @@ class StateStore:
                 self.save()
 
     def save(self) -> None:
+        if self.client.dry_run:
+            return
         if getattr(self, "_in_transaction", False):
             self._pending_save = True
             return
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as handle:
-            json.dump(self.data, handle, indent=2, sort_keys=True)
+        
+        if not self.path:
+            return
+
+        # Ensure metadata is present if we are saving state for the first time or if it's empty
+        if not self.data.get("device"):
+            self.data["device"] = self.client.get_device_metadata()
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(".tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(self.data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
 
     def clear(self) -> None:
-        self.data = {
-            "version": 1,
-            "settings": {},
-            "device_config": {},
-            "packages": {},
-        }
-        if self.path.exists():
+        self.data = self._empty_state()
+        if self.path and self.path.exists():
             self.path.unlink()
 
     def has_entries(self) -> bool:
-        return any(self.data[key] for key in ("settings", "device_config", "packages"))
+        return any(self.data.get(key) for key in ("settings", "device_config", "packages"))
 
 
 class StateRecorder:
@@ -495,6 +559,24 @@ class StateRecorder:
         self._queue_or_run(["am", "set-standby-bucket", package, bucket])
 
     def restore(self) -> List[str]:
+        # Refuse restore on device mismatch
+        current_metadata = self.client.get_device_metadata()
+        saved_device = self.store.data.get("device", {})
+        
+        if saved_device:
+            if current_metadata["serial"] != saved_device.get("serial"):
+                raise ValueError(
+                    f"Device serial mismatch: current={current_metadata['serial']}, "
+                    f"saved={saved_device.get('serial')}"
+                )
+            
+            current_fp = current_metadata.get("fingerprint")
+            saved_fp = saved_device.get("fingerprint")
+            if current_fp and saved_fp and current_fp != saved_fp:
+                raise ValueError(
+                    f"Device fingerprint mismatch: current={current_fp}, saved={saved_fp}"
+                )
+
         messages: List[str] = []
         had_failures = False
         for item in self.store.data["settings"].values():
@@ -638,8 +720,11 @@ class BatteryOptimizerApp:
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.whitelist_path = self.state_dir / WHITELIST_FILE
-        self.store = StateStore(self.state_dir)
+        self.store = StateStore(self.state_dir, client)
         self.recorder = StateRecorder(client, self.store)
+
+    def rebind_device(self) -> None:
+        self.store.rebind()
 
     def load_whitelist(self) -> List[str]:
         if not self.whitelist_path.exists():
@@ -860,6 +945,7 @@ class BatteryOptimizerCLI:
 
         if len(ready) == 1:
             self.client.serial = ready[0]["serial"]
+            self.app.rebind_device()
             return True
 
         self.output("Multiple devices detected:")
@@ -874,6 +960,7 @@ class BatteryOptimizerCLI:
             self.output("Invalid device selection.")
             return False
         self.client.serial = ready[selected - 1]["serial"]
+        self.app.rebind_device()
         return True
 
     def confirm(self, prompt: str) -> bool:
