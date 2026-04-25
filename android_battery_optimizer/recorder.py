@@ -1,6 +1,6 @@
 import re
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence, cast
+from typing import Callable, Dict, List, Optional, Sequence, cast
 from .adb import AdbClient, CommandError
 from .state import StateStore
 from .operations import STANDBY_BUCKET_MAP
@@ -653,10 +653,18 @@ class StateRecorder:
         elif type_ == "package_enabled":
             self.verify_package_enabled(str(entry["package"]), bool(new_value))
 
+    def _restore_and_verify(
+        self,
+        restore_action: Callable[[], object],
+        verify_action: Callable[[], None],
+    ) -> None:
+        restore_action()
+        verify_action()
+
     def restore(self) -> List[str]:
         # Refuse restore on device mismatch
         current_metadata = self.client.get_device_metadata()
-        saved_device = self.store.data.get("device", {})
+        saved_device = cast(Dict[str, object], self.store.data.get("device") or {})
 
         if saved_device:
             if current_metadata["serial"] != saved_device.get("serial"):
@@ -679,55 +687,69 @@ class StateRecorder:
         packages = cast(Dict[str, Dict[str, object]], self.store.data["packages"])
 
         for item in list(settings.values()):
-            namespace = item["namespace"]
-            key = item["key"]
-            value = item["value"]
+            namespace = cast(str, item["namespace"])
+            key = cast(str, item["key"])
+            value = cast(Optional[str], item["value"])
             try:
                 if value is None:
-                    self.client.shell(["settings", "delete", namespace, key], mutate=True)
+                    self._restore_and_verify(
+                        lambda: self.client.shell(["settings", "delete", namespace, key], mutate=True),
+                        lambda: self.verify_setting(namespace, key, None),
+                    )
                 else:
-                    self.client.shell(
-                        ["settings", "put", namespace, key, value],
-                        mutate=True,
+                    self._restore_and_verify(
+                        lambda: self.client.shell(
+                            ["settings", "put", namespace, key, value],
+                            mutate=True,
+                        ),
+                        lambda: self.verify_setting(namespace, key, value),
                     )
                 messages.append(f"Restored setting {namespace}/{key}")
-                self._remove_snapshot_for_entry(
-                    {
-                        "type": "setting",
-                        "namespace": namespace,
-                        "key": key,
-                    }
-                )
-            except CommandError as exc:
+                if not self.client.dry_run:
+                    self._remove_snapshot_for_entry(
+                        {
+                            "type": "setting",
+                            "namespace": namespace,
+                            "key": key,
+                        }
+                    )
+            except (CommandError, VerificationError) as exc:
                 had_failures = True
                 msg = f"Failed to restore setting {namespace}/{key}: {exc}"
                 messages.append(msg)
                 self.client.output(msg)
 
         for item in list(device_config.values()):
-            namespace = item["namespace"]
-            key = item["key"]
-            value = item["value"]
+            namespace = cast(str, item["namespace"])
+            key = cast(str, item["key"])
+            value = cast(Optional[str], item["value"])
             try:
                 if value is None:
-                    self.client.shell(
-                        ["device_config", "delete", namespace, key],
-                        mutate=True,
+                    self._restore_and_verify(
+                        lambda: self.client.shell(
+                            ["device_config", "delete", namespace, key],
+                            mutate=True,
+                        ),
+                        lambda: self.verify_device_config(namespace, key, None),
                     )
                 else:
-                    self.client.shell(
-                        ["device_config", "put", namespace, key, value],
-                        mutate=True,
+                    self._restore_and_verify(
+                        lambda: self.client.shell(
+                            ["device_config", "put", namespace, key, value],
+                            mutate=True,
+                        ),
+                        lambda: self.verify_device_config(namespace, key, value),
                     )
                 messages.append(f"Restored device_config {namespace}/{key}")
-                self._remove_snapshot_for_entry(
-                    {
-                        "type": "device_config",
-                        "namespace": namespace,
-                        "key": key,
-                    }
-                )
-            except CommandError as exc:
+                if not self.client.dry_run:
+                    self._remove_snapshot_for_entry(
+                        {
+                            "type": "device_config",
+                            "namespace": namespace,
+                            "key": key,
+                        }
+                    )
+            except (CommandError, VerificationError) as exc:
                 had_failures = True
                 msg = f"Failed to restore device_config {namespace}/{key}: {exc}"
                 messages.append(msg)
@@ -737,60 +759,75 @@ class StateRecorder:
             appops = cast(Dict[str, Optional[str]], item["appops"])
             for op, value in list(appops.items()):
                 try:
-                    self._restore_appop_value(package, op, value)
-                    messages.append(f"Restored {package} appop {op}")
-                    self._remove_snapshot_for_entry(
-                        {
-                            "type": "appop",
-                            "package": package,
-                            "op": op,
-                        }
+                    self._restore_and_verify(
+                        lambda: self._restore_appop_value(package, op, value),
+                        lambda: self.verify_appop(package, op, str(value)),
                     )
-                except CommandError as exc:
+                    messages.append(f"Restored {package} appop {op}")
+                    if not self.client.dry_run:
+                        self._remove_snapshot_for_entry(
+                            {
+                                "type": "appop",
+                                "package": package,
+                                "op": op,
+                            }
+                        )
+                except (CommandError, VerificationError) as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} appop {op}: {exc}"
                     messages.append(msg)
                     self.client.output(msg)
 
-            bucket = item.get("standby_bucket")
+            bucket = cast(Optional[str], item.get("standby_bucket"))
             if bucket is not None:
                 try:
-                    self.client.shell(
-                        ["am", "set-standby-bucket", package, bucket],
-                        mutate=True,
+                    self._restore_and_verify(
+                        lambda: self.client.shell(
+                            ["am", "set-standby-bucket", package, bucket],
+                            mutate=True,
+                        ),
+                        lambda: self.verify_standby_bucket(package, str(bucket)),
                     )
                     messages.append(f"Restored {package} standby bucket")
-                    self._remove_snapshot_for_entry(
-                        {
-                            "type": "standby_bucket",
-                            "package": package,
-                        }
-                    )
-                except CommandError as exc:
+                    if not self.client.dry_run:
+                        self._remove_snapshot_for_entry(
+                            {
+                                "type": "standby_bucket",
+                                "package": package,
+                            }
+                        )
+                except (CommandError, VerificationError) as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} standby bucket: {exc}"
                     messages.append(msg)
                     self.client.output(msg)
 
-            enabled = item.get("enabled")
+            enabled = cast(Optional[bool], item.get("enabled"))
             if enabled is not None:
                 try:
                     command = ["pm", "enable", "--user", "0", package]
                     if not enabled:
                         command = ["pm", "disable-user", "--user", "0", package]
-                    self.client.shell(command, mutate=True)
-                    messages.append(f"Restored {package} enabled state")
-                    self._remove_snapshot_for_entry(
-                        {
-                            "type": "package_enabled",
-                            "package": package,
-                        }
+                    self._restore_and_verify(
+                        lambda: self.client.shell(command, mutate=True),
+                        lambda: self.verify_package_enabled(package, enabled),
                     )
-                except CommandError as exc:
+                    messages.append(f"Restored {package} enabled state")
+                    if not self.client.dry_run:
+                        self._remove_snapshot_for_entry(
+                            {
+                                "type": "package_enabled",
+                                "package": package,
+                            }
+                        )
+                except (CommandError, VerificationError) as exc:
                     had_failures = True
                     msg = f"Failed to restore {package} enabled state: {exc}"
                     messages.append(msg)
                     self.client.output(msg)
+
+        if self.client.dry_run:
+            return messages
 
         if had_failures:
             self.store.save()

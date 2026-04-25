@@ -487,6 +487,11 @@ class OptimizerTests(unittest.TestCase):
                     "standby_bucket": None,
                 }
             }
+            mock_run.side_effect = lambda args, **kwargs: MagicMock(
+                returncode=0,
+                stdout="No operations.",
+                stderr="",
+            ) if args[:5] == ["adb", "-s", "serial-1", "shell", "cmd"] and args[5:8] == ["appops", "get", "com.example.app"] else MagicMock(returncode=0, stdout="", stderr="")
 
             messages = app.recorder.restore()
 
@@ -521,6 +526,11 @@ class OptimizerTests(unittest.TestCase):
                     "standby_bucket": None,
                 }
             }
+            mock_run.side_effect = lambda args, **kwargs: MagicMock(
+                returncode=0,
+                stdout="No operations.",
+                stderr="",
+            ) if args[:5] == ["adb", "-s", "serial-1", "shell", "cmd"] and args[5:8] == ["appops", "get", "com.example.app"] else MagicMock(returncode=0, stdout="", stderr="")
             app.recorder.restore()
 
             for call in mock_run.call_args_list:
