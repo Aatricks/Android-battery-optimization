@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import List, Set, Sequence
-from .adb import AdbClient
+from .adb import AdbClient, CommandError
 from .state import StateStore
 from .recorder import StateRecorder
 
@@ -39,7 +39,17 @@ class BatteryOptimizerApp:
         args: List[object] = ["pm", "list", "packages"]
         if third_party:
             args.append("-3")
-        output = self.client.shell_text(args, check=False)
+        result = self.client.shell(args, check=False)
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            details = stderr or stdout or "unknown error"
+            raise CommandError(
+                f"Failed to list packages with `{' '.join(str(arg) for arg in args)}`: {details}",
+                result=result,
+            )
+
+        output = result.stdout.strip()
         packages = []
         for line in output.splitlines():
             if ":" in line:
@@ -73,7 +83,7 @@ class BatteryOptimizerApp:
 
         if not self.client.supports_device_config():
             raise ValueError("Device does not support `device_config` command. Experimental optimization aborted.")
-        
+
         for namespace in ("global", "system", "secure"):
             if not self.client.supports_settings_namespace(namespace):
                 raise ValueError(f"Device does not support `settings` namespace `{namespace}`. Experimental optimization aborted.")
@@ -188,7 +198,7 @@ class BatteryOptimizerApp:
         packages = self.get_packages(third_party=True)
         installed = self.get_installed_packages_set()
         skipped = []
-        
+
         with self.recorder.transaction():
             self.recorder.prefetch_package_states()
             for package in packages:

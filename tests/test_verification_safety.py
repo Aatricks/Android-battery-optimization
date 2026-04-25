@@ -81,6 +81,29 @@ class TestVerificationSafety(unittest.TestCase):
         with self.assertRaises(VerificationError):
             self.recorder.verify_standby_bucket("pkg", "active")
 
+    def test_verify_package_enabled_read_failure_raises_verification_error(self):
+        self.mock_runner.run.return_value = CommandResult(returncode=1, stdout="", stderr="error")
+        with self.assertRaises(VerificationError) as cm:
+            self.recorder.verify_package_enabled("pkg", True)
+
+        self.assertIn("package-enabled verification readback failed", str(cm.exception))
+
+    def test_verify_package_enabled_success_enabled(self):
+        self.mock_runner.run.return_value = CommandResult(
+            returncode=0,
+            stdout="package:pkg\n",
+            stderr="",
+        )
+        self.recorder.verify_package_enabled("pkg", True)
+
+    def test_verify_package_enabled_success_disabled(self):
+        self.mock_runner.run.return_value = CommandResult(
+            returncode=0,
+            stdout="package:pkg\n",
+            stderr="",
+        )
+        self.recorder.verify_package_enabled("pkg", False)
+
     def test_delete_setting_does_not_pass_verification_when_readback_fails(self):
         self.mock_runner.run.return_value = CommandResult(returncode=1, stdout="", stderr="device offline")
         with self.assertRaises(VerificationError):

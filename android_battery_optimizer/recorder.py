@@ -608,10 +608,17 @@ class StateRecorder:
     def verify_package_enabled(self, package: str, expected_enabled: bool) -> None:
         if self.client.dry_run:
             return
-        output = self.client.shell_text(
+        result = self.client.shell(
             ["pm", "list", "packages", "-e" if expected_enabled else "-d", package],
             check=False,
         )
+        if result.returncode != 0:
+            raise VerificationError(
+                f"Verification failed for package {package} enabled state: "
+                f"package-enabled verification readback failed with exit code {result.returncode}"
+            )
+
+        output = result.stdout.strip()
         found = False
         for line in output.splitlines():
             if line.strip() == f"package:{package}":

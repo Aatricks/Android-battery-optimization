@@ -427,6 +427,42 @@ class OptimizerTests(unittest.TestCase):
                 app.validate_package("com.bad.actor;rm -rf /")
 
     @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_get_packages_failure_raises_command_error(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="permission denied")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            with self.assertRaises(CommandError) as cm:
+                app.get_packages()
+
+            self.assertIn("Failed to list packages", str(cm.exception))
+            self.assertIn("permission denied", str(cm.exception))
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_get_packages_success_parses_packages(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="package:com.example.b\npackage:com.example.a\n",
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            self.assertEqual(app.get_packages(), ["com.example.a", "com.example.b"])
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_validate_package_propagates_package_list_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="device offline")
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            app.client.serial = "serial-1"
+
+            with self.assertRaises(CommandError):
+                app.validate_package("com.example.app")
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
     def test_partial_rollback_on_batch_failure(self, mock_run):
         def side_effect(args, **kwargs):
             input_data = kwargs.get('input')
