@@ -63,23 +63,21 @@ class StateRecorder:
                     script = "\n".join(script_lines)
                     batch_dispatched = True
                     self.client.shell([], mutate=True, input_data=script)
-                    # Verify all entries after batch success
+                    # If we reach here, batch shell succeeded.
                     if self.verify:
                         for entry in self._ledger:
                             self._verify_entry(entry)
         except Exception as exc:
             if batch_dispatched:
-                stdout = getattr(getattr(exc, "result", None), "stdout", "")
-                successful_indices = [
-                    int(m.group(1)) for m in re.finditer(r"SUCCESS_(\d+)", stdout)
-                ]
-                # If VerificationError, we want to revert ALL commands that were sent in the batch
-                # because we don't know for sure which one failed and we want to keep it atomic.
-                # SUCCESS_i indicates it was successfully executed, so it should be reverted.
                 if isinstance(exc, VerificationError):
-                    # For verification error, all successfully dispatched commands should be rolled back.
+                    # Batch succeeded, so all indices are successful
+                    successful_indices = list(range(len(self._ledger)))
                     self._revert_ledger(successful_indices)
                 else:
+                    stdout = getattr(getattr(exc, "result", None), "stdout", "")
+                    successful_indices = [
+                        int(m.group(1)) for m in re.finditer(r"SUCCESS_(\d+)", stdout)
+                    ]
                     self._revert_ledger(successful_indices)
             raise
         finally:
@@ -100,7 +98,6 @@ class StateRecorder:
             self.client.shell(args, mutate=True)
 
     def _revert_ledger(self, successful_indices: Optional[List[int]] = None) -> None:
-        failures = []
         entries_to_revert = []
         if successful_indices is not None:
             # Revert in reverse order of indices to be safe
@@ -110,54 +107,94 @@ class StateRecorder:
         else:
             entries_to_revert = list(reversed(self._ledger))
 
+        had_failures = False
         for entry in entries_to_revert:
-            type_ = entry["type"]
             try:
-                if type_ == "setting":
-                    namespace = str(entry["namespace"])
-                    key = str(entry["key"])
-                    prior_value = entry["prior_value"]
-                    if prior_value is None:
-                        self.client.shell(["settings", "delete", namespace, key], mutate=True)
-                    else:
-                        self.client.shell(["settings", "put", namespace, key, prior_value], mutate=True)
-                elif type_ == "device_config":
-                    namespace = str(entry["namespace"])
-                    key = str(entry["key"])
-                    prior_value = entry["prior_value"]
-                    if prior_value is None:
-                        self.client.shell(["device_config", "delete", namespace, key], mutate=True)
-                    else:
-                        self.client.shell(["device_config", "put", namespace, key, prior_value], mutate=True)
-                elif type_ == "appop":
-                    package = str(entry["package"])
-                    op = str(entry["op"])
-                    prior_value = entry["prior_value"]
-                    if prior_value == "default" or prior_value is None:
-                        self.client.shell(["cmd", "appops", "reset", package, op], mutate=True)
-                    else:
-                        self.client.shell(["cmd", "appops", "set", package, op, prior_value], mutate=True)
-                elif type_ == "standby_bucket":
-                    package = str(entry["package"])
-                    prior_value = entry["prior_value"]
-                    if prior_value:
-                        self.client.shell(["am", "set-standby-bucket", package, str(prior_value)], mutate=True)
-                elif type_ == "package_enabled":
-                    package = str(entry["package"])
-                    prior_value = bool(entry["prior_value"])
-                    command = ["pm", "enable", "--user", "0", package]
-                    if not prior_value:
-                        command = ["pm", "disable-user", "--user", "0", package]
-                    self.client.shell(command, mutate=True)
+                self._perform_rollback(entry)
+                self._remove_snapshot_for_entry(entry)
             except CommandError as exc:
-                msg = f"Rollback failed for {type_} {entry}: {exc}"
-                failures.append(msg)
+                had_failures = True
+                msg = f"Rollback failed for {entry}: {exc}"
                 self.client.output(msg)
                 self._persist_failed_rollback(entry)
                 
-        if failures:
+        if had_failures:
             self.client.output("Warning: Partial state corruption due to rollback failures.")
-            self.store.save()
+        
+        self.store.save()
+
+    def _perform_rollback(self, entry: Dict[str, object]) -> None:
+        type_ = entry["type"]
+        if type_ == "setting":
+            namespace = str(entry["namespace"])
+            key = str(entry["key"])
+            prior_value = entry["prior_value"]
+            if prior_value is None:
+                self.client.shell(["settings", "delete", namespace, key], mutate=True)
+            else:
+                self.client.shell(["settings", "put", namespace, key, prior_value], mutate=True)
+        elif type_ == "device_config":
+            namespace = str(entry["namespace"])
+            key = str(entry["key"])
+            prior_value = entry["prior_value"]
+            if prior_value is None:
+                self.client.shell(["device_config", "delete", namespace, key], mutate=True)
+            else:
+                self.client.shell(["device_config", "put", namespace, key, prior_value], mutate=True)
+        elif type_ == "appop":
+            package = str(entry["package"])
+            op = str(entry["op"])
+            prior_value = entry["prior_value"]
+            if prior_value == "default" or prior_value is None:
+                self.client.shell(["cmd", "appops", "reset", package, op], mutate=True)
+            else:
+                self.client.shell(["cmd", "appops", "set", package, op, prior_value], mutate=True)
+        elif type_ == "standby_bucket":
+            package = str(entry["package"])
+            prior_value = entry["prior_value"]
+            if prior_value:
+                self.client.shell(["am", "set-standby-bucket", package, str(prior_value)], mutate=True)
+        elif type_ == "package_enabled":
+            package = str(entry["package"])
+            prior_value = bool(entry["prior_value"])
+            command = ["pm", "enable", "--user", "0", package]
+            if not prior_value:
+                command = ["pm", "disable-user", "--user", "0", package]
+            self.client.shell(command, mutate=True)
+
+    def _remove_snapshot_for_entry(self, entry: Dict[str, object]) -> None:
+        type_ = entry["type"]
+        if type_ == "setting":
+            snapshot_key = f"{entry['namespace']}/{entry['key']}"
+            self.store.data["settings"].pop(snapshot_key, None)
+        elif type_ == "device_config":
+            snapshot_key = f"{entry['namespace']}/{entry['key']}"
+            self.store.data["device_config"].pop(snapshot_key, None)
+        elif type_ == "appop":
+            package = str(entry["package"])
+            op = str(entry["op"])
+            if package in self.store.data["packages"]:
+                self.store.data["packages"][package]["appops"].pop(op, None)
+                self._cleanup_package_entry(package)
+        elif type_ == "standby_bucket":
+            package = str(entry["package"])
+            if package in self.store.data["packages"]:
+                self.store.data["packages"][package]["standby_bucket"] = None
+                self._cleanup_package_entry(package)
+        elif type_ == "package_enabled":
+            package = str(entry["package"])
+            if package in self.store.data["packages"]:
+                self.store.data["packages"][package]["enabled"] = None
+                self._cleanup_package_entry(package)
+
+    def _remove_snapshots_for_entries(self, entries: List[Dict[str, object]]) -> None:
+        for entry in entries:
+            self._remove_snapshot_for_entry(entry)
+
+    def _cleanup_package_entry(self, package: str) -> None:
+        pkg = self.store.data["packages"].get(package)
+        if pkg and not pkg["appops"] and pkg["standby_bucket"] is None and pkg["enabled"] is None:
+            self.store.data["packages"].pop(package)
 
     def _persist_failed_rollback(self, entry: Dict[str, object]) -> None:
         type_ = entry["type"]

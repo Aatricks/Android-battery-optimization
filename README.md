@@ -1,12 +1,5 @@
 # Android Battery Optimizer
 
-Local ADB utility for experimenting with Android battery-related settings from a computer.
-
-This project is now `safe by default`:
-- The default optimization path only applies changes that are documented and reasonably reversible.
-- Riskier changes are still available, but they are labeled `Experimental` and require confirmation.
-- Every mutating action snapshots the prior state first, so `Revert Saved State` restores the original values instead of guessing defaults.
-
 This is not a guarantee of better battery life. Android already includes its own battery-management systems, and some device-specific tweaks can reduce battery drain on one phone while breaking notifications, sync, companion devices, or app reliability on another.
 
 ## Safety Model
