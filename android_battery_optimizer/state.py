@@ -198,9 +198,7 @@ class StateStore:
         if not self.path:
             return
 
-        # Ensure metadata is present if we are saving state for the first time or if it's empty
-        if not self.data.get("device"):
-            self.data["device"] = self.client.get_device_metadata()
+        self._ensure_device_metadata()
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(".tmp")
@@ -214,6 +212,15 @@ class StateStore:
             if tmp_path.exists():
                 tmp_path.unlink()
             raise
+
+    def _ensure_device_metadata(self) -> None:
+        if self.data.get("device"):
+            return
+
+        try:
+            self.data["device"] = self.client.get_device_metadata()
+        except CommandError:
+            self.data["device"] = self.client.get_minimal_device_metadata()
 
     def clear(self) -> None:
         self.data = self._empty_state()

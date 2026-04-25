@@ -99,14 +99,35 @@ class AdbClient:
         )
 
     def get_device_metadata(self) -> Dict[str, str]:
-        info = self.get_device_info_struct()
+        serial = self.serial or "unknown-device"
+        brand = self.shell_text(["getprop", "ro.product.brand"], check=True)
+        model = self.shell_text(["getprop", "ro.product.model"], check=True)
+        release = self.shell_text(["getprop", "ro.build.version.release"], check=True)
+        sdk_str = self.shell_text(["getprop", "ro.build.version.sdk"], check=True)
+        fingerprint = self.shell_text(["getprop", "ro.build.fingerprint"], check=True)
+
+        try:
+            int(sdk_str)
+        except (ValueError, TypeError):
+            sdk_str = "0"
+
         return {
-            "serial": info.serial,
-            "brand": info.brand,
-            "model": info.model,
-            "android_release": info.android_release,
-            "sdk": str(info.sdk_int),
-            "fingerprint": info.fingerprint,
+            "serial": serial,
+            "brand": brand,
+            "model": model,
+            "android_release": release,
+            "sdk": sdk_str,
+            "fingerprint": fingerprint,
+        }
+
+    def get_minimal_device_metadata(self) -> Dict[str, str]:
+        return {
+            "serial": self.serial or "unknown-device",
+            "brand": "",
+            "model": "",
+            "android_release": "",
+            "sdk": "",
+            "fingerprint": "",
         }
 
     def supports_device_config(self) -> bool:

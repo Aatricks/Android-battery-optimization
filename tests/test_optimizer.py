@@ -157,6 +157,133 @@ class OptimizerTests(unittest.TestCase):
                 data = json.load(f)
                 self.assertEqual(data["version"], 2)
 
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_state_save_falls_back_to_minimal_metadata_when_getprop_times_out(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "getprop" in cmd:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _, _ = self.make_app_and_cli(tmp_path)
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            app.store.data["settings"] = {
+                "global/test": {"namespace": "global", "key": "test", "value": "1"}
+            }
+
+            app.store.save()
+
+            state_file = tmp_path / "devices" / "serial-1" / "state.json"
+            with state_file.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+
+            self.assertEqual(
+                data["device"],
+                {
+                    "serial": "serial-1",
+                    "brand": "",
+                    "model": "",
+                    "android_release": "",
+                    "sdk": "",
+                    "fingerprint": "",
+                },
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_state_save_falls_back_to_minimal_metadata_when_getprop_command_fails(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "getprop" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="property lookup failed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _, _ = self.make_app_and_cli(tmp_path)
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            app.store.data["settings"] = {
+                "global/test": {"namespace": "global", "key": "test", "value": "1"}
+            }
+
+            app.store.save()
+
+            state_file = tmp_path / "devices" / "serial-1" / "state.json"
+            with state_file.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+
+            self.assertEqual(
+                data["device"],
+                {
+                    "serial": "serial-1",
+                    "brand": "",
+                    "model": "",
+                    "android_release": "",
+                    "sdk": "",
+                    "fingerprint": "",
+                },
+            )
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_state_save_still_raises_filesystem_write_error(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _, _ = self.make_app_and_cli(tmp_path)
+            app.client.serial = "serial-1"
+            app.rebind_device()
+            app.store.data["settings"] = {
+                "global/test": {"namespace": "global", "key": "test", "value": "1"}
+            }
+
+            with patch("android_battery_optimizer.state.os.replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    app.store.save()
+
+    @patch("android_battery_optimizer.adb.subprocess.run")
+    def test_restore_serial_mismatch_still_works_with_minimal_metadata(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "getprop" in cmd:
+                if "-s serial-1" in cmd:
+                    return MagicMock(returncode=1, stdout="", stderr="property lookup failed")
+                return MagicMock(returncode=0, stdout="value\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            app1, _, _ = self.make_app_and_cli(tmp_path)
+            app1.client.serial = "serial-1"
+            app1.rebind_device()
+            app1.store.data["settings"] = {
+                "global/test": {"namespace": "global", "key": "test", "value": "1"}
+            }
+            app1.store.save()
+
+            state_file = tmp_path / "devices" / "serial-1" / "state.json"
+
+            app2, _, _ = self.make_app_and_cli(tmp_path)
+            app2.client.serial = "serial-2"
+            app2.rebind_device()
+            app2.store.path = state_file
+            app2.store.data = app2.store._load()
+
+            with self.assertRaises(ValueError) as cm:
+                app2.revert_saved_state()
+
+            self.assertIn("Device serial mismatch", str(cm.exception))
+
     def test_parse_adb_devices(self):
         devices = parse_adb_devices(
             "List of devices attached\nserial-1\tdevice\nserial-2\tunauthorized\n"
