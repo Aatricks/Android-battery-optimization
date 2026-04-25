@@ -82,7 +82,8 @@ class TestSmartRestrict(unittest.TestCase):
 
     def test_skips_whitelist(self):
         self.app.save_whitelist(["com.example.app"])
-        skipped = self.app.smart_restrict(aggressive=False)
+        result = self.app.smart_restrict(aggressive=False)
+        skipped = [s["package"] for s in result.get("skipped", [])]
         self.assertIn("com.example.app", skipped)
         
         # Verify appops wasn't called for it
@@ -91,7 +92,8 @@ class TestSmartRestrict(unittest.TestCase):
                 self.fail("Whitelisted app was modified")
 
     def test_skips_critical_packages(self):
-        skipped = self.app.smart_restrict(aggressive=False)
+        result = self.app.smart_restrict(aggressive=False)
+        skipped = [s["package"] for s in result["skipped"]]
         self.assertIn("com.critical.launcher", skipped)
         
         for cmd in self.runner.commands:

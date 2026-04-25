@@ -304,7 +304,7 @@ class BatteryOptimizerApp:
         
         return critical
 
-    def smart_restrict(self, aggressive: bool = False, min_last_used_days: Optional[int] = None) -> List[str]:
+    def smart_restrict(self, aggressive: bool = False, min_last_used_days: Optional[int] = None) -> Dict[str, Any]:
         if not self.client.supports_appops():
             raise ValueError("Device does not support `appops` command via `cmd`.")
         if not self.client.supports_standby_bucket():
@@ -312,11 +312,15 @@ class BatteryOptimizerApp:
 
         whitelist = set(self.load_whitelist())
         critical = self._get_critical_packages()
+        
+        applied = []
         skipped = []
+        kept = []
         
         report = self.diagnose(third_party_only=True)
+        warnings = report.get("warnings", [])
         
-        if any("Failed to list packages" in w for w in report.get("warnings", [])):
+        if any("Failed to list packages" in w for w in warnings):
             raise ValueError("Diagnose could not list packages.")
             
         if not report["packages"]:
@@ -331,37 +335,58 @@ class BatteryOptimizerApp:
             self.recorder.prefetch_package_states()
             for pkg_info in report["packages"]:
                 pkg = pkg_info["package"]
-                if pkg in whitelist or pkg in critical:
-                    skipped.append(pkg)
+                if pkg in whitelist:
+                    skipped.append({"package": pkg, "reason": "whitelisted"})
+                    continue
+                if pkg in critical:
+                    skipped.append({"package": pkg, "reason": "critical"})
                     continue
                     
                 if min_last_used_days is not None:
-                    last_used_hint = pkg_info.get("signals", {}).get("last_used_hint")
-                    try:
-                        if last_used_hint is not None:
-                            last_used_ms = float(last_used_hint)
-                            if (current_time_ms - last_used_ms) < (min_last_used_days * 86400 * 1000):
-                                skipped.append(pkg)
-                                continue
-                        else:
-                            skipped.append(pkg)
+                    last_used = pkg_info.get("signals", {}).get("last_used", {})
+                    if last_used.get("parsed"):
+                        last_used_ms = float(last_used["epoch_ms"])
+                        if (current_time_ms - last_used_ms) < (min_last_used_days * 86400 * 1000):
+                            skipped.append({"package": pkg, "reason": "recently_used"})
                             continue
-                    except ValueError:
-                        skipped.append(pkg)
+                    else:
+                        skipped.append({"package": pkg, "reason": "last_used_unknown"})
                         continue
                 
                 rec = pkg_info["recommendation"]
+                reason = pkg_info.get("reason", "")
+                
+                if rec == "keep":
+                    kept.append({"package": pkg, "reason": reason})
+                    continue
                 
                 if aggressive and rec == "aggressive_restrict":
                     self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
                     self.recorder.set_standby_bucket(pkg, "restricted")
+                    applied.append({
+                        "package": pkg,
+                        "appop": "ignore",
+                        "bucket": "restricted",
+                        "reason": reason
+                    })
                 elif not aggressive and rec in ("restrict", "aggressive_restrict"):
                     self.recorder.set_appop(pkg, "RUN_ANY_IN_BACKGROUND", "ignore")
                     self.recorder.set_standby_bucket(pkg, "rare")
+                    applied.append({
+                        "package": pkg,
+                        "appop": "ignore",
+                        "bucket": "rare",
+                        "reason": reason
+                    })
                 else:
-                    skipped.append(pkg)
+                    skipped.append({"package": pkg, "reason": "unsupported_recommendation"})
                     
-        return skipped
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "kept": kept,
+            "warnings": warnings
+        }
 
     def revert_saved_state(self) -> List[str]:
         if not self.store.has_entries():

@@ -2,6 +2,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 from .adb import AdbClient
+from .verification import parse_appop_output, VerificationError
 
 class Diagnoser:
     def __init__(self, client: AdbClient):
@@ -76,15 +77,7 @@ class Diagnoser:
     def _get_appops(self, pkg: str) -> Optional[str]:
         try:
             out = self.client.shell_text(["cmd", "appops", "get", pkg, "RUN_ANY_IN_BACKGROUND"], check=True)
-            if "ignore" in out.lower():
-                return "ignore"
-            if "allow" in out.lower():
-                return "allow"
-            if "deny" in out.lower():
-                return "deny"
-            if "default" in out.lower():
-                return "default"
-            return out.strip()
+            return parse_appop_output(out)
         except Exception:
             return None
 
@@ -99,25 +92,39 @@ class Diagnoser:
         jobs_seen = self._has_package_signal(pkg, dumpsys["jobscheduler"]) if dumpsys["jobscheduler"] else None
         wakelocks_seen = self._has_package_signal(pkg, dumpsys["batterystats"]) if dumpsys["batterystats"] else None
         
-        last_used_hint = None
+        last_used = {
+            "raw": None,
+            "epoch_ms": None,
+            "parsed": False
+        }
         if dumpsys["usagestats"]:
             for line in dumpsys["usagestats"].splitlines():
                 if self._has_package_signal(pkg, line) and "lastTimeUsed" in line:
+                    raw_val = None
                     m = re.search(r'lastTimeUsed="([^"]+)"', line)
                     if m:
-                        last_used_hint = m.group(1)
+                        raw_val = m.group(1)
                     elif "=" in line:
                         parts = line.split()
                         for p in parts:
                             if p.startswith("lastTimeUsed="):
-                                last_used_hint = p.split("=")[1].strip('"')
+                                raw_val = p.split("=")[1].strip('"')
+                                break
+                    
+                    if raw_val is not None:
+                        last_used["raw"] = raw_val
+                        try:
+                            last_used["epoch_ms"] = int(raw_val)
+                            last_used["parsed"] = True
+                        except ValueError:
+                            pass
                     break
         
         return {
             "alarms_seen": alarms_seen,
             "jobs_seen": jobs_seen,
             "wakelocks_seen": wakelocks_seen,
-            "last_used_hint": last_used_hint
+            "last_used": last_used
         }
         
     def _recommend(self, bucket: Optional[str], appops: Optional[str], signals: Dict[str, Any]) -> tuple[str, str]:

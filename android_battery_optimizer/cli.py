@@ -309,13 +309,41 @@ class BatteryOptimizerCLI:
                 mode = "aggressive" if args.aggressive else "balanced"
                 self.output(f"Running smart-restrict in {mode} mode...")
                 
-                skipped = self.app.smart_restrict(
+                result = self.app.smart_restrict(
                     aggressive=args.aggressive, 
                     min_last_used_days=args.min_last_used_days
                 )
                 
-                self.output(f"Skipped or ignored {len(skipped)} packages.")
-                self.output("Smart restrict applied successfully.")
+                if result.get("warnings"):
+                    self.output("\nWarnings:")
+                    for w in result["warnings"]:
+                        self.output(f"  {w}")
+                
+                applied = result.get("applied", [])
+                skipped = result.get("skipped", [])
+                kept = result.get("kept", [])
+                
+                self.output("\nSmart restrict summary:")
+                self.output(f"  Restricted: {len(applied)}")
+                self.output(f"  Skipped: {len(skipped)}")
+                self.output(f"  Kept: {len(kept)}")
+                
+                if applied:
+                    if args.dry_run:
+                        self.output("\nWould restrict (dry-run):")
+                    else:
+                        self.output("\nRestricted:")
+                    for item in applied:
+                        self.output(f"  {item['package']} -> RUN_ANY_IN_BACKGROUND={item['appop']}, bucket={item['bucket']}")
+                        self.output(f"    Reason: {item['reason']}")
+                        
+                if skipped:
+                    self.output("\nSkipped:")
+                    for item in skipped:
+                        self.output(f"  {item['package']} -> {item['reason']}")
+                        
+                if not args.dry_run:
+                    self.output("\nSmart restrict applied successfully.")
                 return 0
 
             elif args.command == "revert":
