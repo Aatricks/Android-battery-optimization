@@ -98,6 +98,16 @@ class SubprocessRunner(CommandRunner):
         return shutil.which(name)
 
 
+@dataclass
+class DeviceInfo:
+    serial: str
+    brand: str
+    model: str
+    android_release: str
+    sdk_int: int
+    fingerprint: str
+
+
 class AdbClient:
     DEFAULT_TIMEOUT_SECONDS = 30
     LONG_TIMEOUT_SECONDS = 300
@@ -114,28 +124,84 @@ class AdbClient:
         self.dry_run = dry_run
         self.output = output
 
+    def get_device_info_struct(self) -> DeviceInfo:
+        serial = self.serial or "unknown-device"
+        brand = self.shell_text(["getprop", "ro.product.brand"], check=False)
+        model = self.shell_text(["getprop", "ro.product.model"], check=False)
+        release = self.shell_text(["getprop", "ro.build.version.release"], check=False)
+        sdk_str = self.shell_text(["getprop", "ro.build.version.sdk"], check=False)
+        fingerprint = self.shell_text(["getprop", "ro.build.fingerprint"], check=False)
+
+        try:
+            sdk_int = int(sdk_str)
+        except (ValueError, TypeError):
+            sdk_int = 0
+
+        return DeviceInfo(
+            serial=serial,
+            brand=brand,
+            model=model,
+            android_release=release,
+            sdk_int=sdk_int,
+            fingerprint=fingerprint,
+        )
+
     def get_device_metadata(self) -> Dict[str, str]:
-        metadata = {
-            "serial": self.serial or "unknown-device",
-            "brand": "",
-            "model": "",
-            "android_release": "",
-            "sdk": "",
-            "fingerprint": "",
+        info = self.get_device_info_struct()
+        return {
+            "serial": info.serial,
+            "brand": info.brand,
+            "model": info.model,
+            "android_release": info.android_release,
+            "sdk": str(info.sdk_int),
+            "fingerprint": info.fingerprint,
         }
-        props = {
-            "brand": "ro.product.brand",
-            "model": "ro.product.model",
-            "android_release": "ro.build.version.release",
-            "sdk": "ro.build.version.sdk",
-            "fingerprint": "ro.build.fingerprint",
-        }
-        for key, prop in props.items():
-            try:
-                metadata[key] = self.shell_text(["getprop", prop], check=False)
-            except Exception:
-                pass
-        return metadata
+
+    def supports_device_config(self) -> bool:
+        try:
+            # device_config list will return exit code 0 if supported
+            # some devices might return help text, some might just work.
+            # a safe check is running 'device_config list' which should not fail.
+            result = self.shell(["device_config", "list"], check=False)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def supports_appops(self) -> bool:
+        try:
+            # 'cmd appops' was introduced in Android 6.0 (SDK 23)
+            # but 'appops' command itself might vary.
+            # 'cmd appops help' is a safe way to check support.
+            result = self.shell(["cmd", "appops", "help"], check=False)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def supports_standby_bucket(self) -> bool:
+        try:
+            # Standby buckets were introduced in Android 9 (SDK 28)
+            # 'am set-standby-bucket' should be available.
+            # We can check if 'am' help mentions it or just check if the command exists.
+            # A more conservative check is SDK >= 28.
+            info = self.get_device_info_struct()
+            if info.sdk_int < 28:
+                return False
+            # Also check if command actually runs (without arguments it should show error/help)
+            result = self.shell(["am", "set-standby-bucket"], check=False)
+            # am set-standby-bucket usually returns error code if no args, but if command is missing
+            # it will return 'not found' or similar with non-zero exit code.
+            # However, some 'am' versions might return 0 even for errors.
+            # 'cmd' based approach is better if available.
+            return result.returncode != 127 # 127 is usually command not found
+        except Exception:
+            return False
+
+    def supports_settings_namespace(self, namespace: str) -> bool:
+        try:
+            result = self.shell(["settings", "list", namespace], check=False)
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def adb_exists(self) -> bool:
         return self.runner.which("adb") is not None
@@ -1040,10 +1106,8 @@ class BatteryOptimizerApp:
 
 
     def get_device_info(self) -> str:
-        brand = self.client.shell_text(["getprop", "ro.product.brand"], check=False)
-        model = self.client.shell_text(["getprop", "ro.product.model"], check=False)
-        version = self.client.shell_text(["getprop", "ro.build.version.release"], check=False)
-        return f"{brand} {model} (Android {version})".strip()
+        info = self.client.get_device_info_struct()
+        return f"{info.brand} {info.model} (Android {info.android_release})".strip()
 
     def get_packages(self, third_party: bool = True) -> List[str]:
         args: List[object] = ["pm", "list", "packages"]
@@ -1064,6 +1128,9 @@ class BatteryOptimizerApp:
             raise ValueError(f"Package `{package}` is not installed on the connected device.")
 
     def apply_documented_safe_optimizations(self) -> None:
+        if not self.client.supports_device_config():
+            raise ValueError("Device does not support `device_config` command. Optimization aborted.")
+
         with self.recorder.transaction():
             self.recorder.put_device_config("activity_manager", "bg_auto_restrict_abusive_apps", 1)
             self.recorder.put_device_config(
@@ -1073,6 +1140,18 @@ class BatteryOptimizerApp:
             )
 
     def apply_experimental_optimizations(self) -> None:
+        info = self.client.get_device_info_struct()
+        # SDK 26 (Android 8.0) is a conservative minimum for device_config and stable settings behavior
+        if info.sdk_int < 26:
+             raise ValueError(f"Device SDK {info.sdk_int} is too old for experimental optimizations (min SDK 26 required).")
+
+        if not self.client.supports_device_config():
+            raise ValueError("Device does not support `device_config` command. Experimental optimization aborted.")
+        
+        for namespace in ("global", "system", "secure"):
+            if not self.client.supports_settings_namespace(namespace):
+                raise ValueError(f"Device does not support `settings` namespace `{namespace}`. Experimental optimization aborted.")
+
         with self.recorder.transaction():
             doze_settings = {
                 "light_after_inactive_to": "0",
@@ -1129,9 +1208,13 @@ class BatteryOptimizerApp:
             self.apply_documented_safe_optimizations()
 
     def apply_samsung_experimental_optimizations(self) -> None:
-        brand = self.client.shell_text(["getprop", "ro.product.brand"], check=False)
-        if brand.lower() != "samsung":
+        info = self.client.get_device_info_struct()
+        if info.brand.lower() != "samsung":
             raise ValueError("Connected device is not Samsung.")
+
+        for namespace in ("system", "global", "secure"):
+            if not self.client.supports_settings_namespace(namespace):
+                raise ValueError(f"Device does not support `settings` namespace `{namespace}`. Samsung optimization aborted.")
 
         with self.recorder.transaction():
             self.recorder.prefetch_package_states()
@@ -1170,6 +1253,11 @@ class BatteryOptimizerApp:
                     self.recorder.set_package_enabled(package, enabled=False)
 
     def restrict_background_apps(self, level: str = "ignore") -> List[str]:
+        if not self.client.supports_appops():
+            raise ValueError("Device does not support `appops` command via `cmd`. Background restriction aborted.")
+        if not self.client.supports_standby_bucket():
+            raise ValueError("Device does not support `am set-standby-bucket`. Background restriction aborted.")
+
         whitelist = set(self.load_whitelist())
         packages = self.get_packages(third_party=True)
         installed = self.get_installed_packages_set()

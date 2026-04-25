@@ -598,6 +598,12 @@ class OptimizerTests(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="Package com.example.music:\n  RUN_ANY_IN_BACKGROUND: allow\n", stderr="")
             if "dumpsys usagestats" in cmd:
                 return MagicMock(returncode=0, stdout="package=com.example.music bucket=active\n", stderr="")
+            if "ro.build.version.sdk" in cmd:
+                return MagicMock(returncode=0, stdout="30\n", stderr="")
+            if "cmd appops help" in cmd:
+                return MagicMock(returncode=0, stdout="help", stderr="")
+            if "am set-standby-bucket" in cmd:
+                return MagicMock(returncode=0, stdout="help", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
         mock_run.side_effect = side_effect
 
@@ -830,6 +836,67 @@ class OptimizerTests(unittest.TestCase):
                 ["adb", "-s", "serial-1", "shell", "settings", "get", "global", "s2"],
                 capture_output=True, text=True, input=None, timeout=None
             )
+
+
+    @patch("optimizer.subprocess.run")
+    def test_safe_optimizations_refuse_without_device_config_support(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "device_config list" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="not found")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            with self.assertRaises(ValueError) as cm:
+                app.apply_documented_safe_optimizations()
+            self.assertIn("Device does not support `device_config`", str(cm.exception))
+
+    @patch("optimizer.subprocess.run")
+    def test_restrict_background_apps_refuses_without_appops_support(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "cmd appops help" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="not found")
+            return MagicMock(returncode=0, stdout="30\n", stderr="") # sdk 30
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            with self.assertRaises(ValueError) as cm:
+                app.restrict_background_apps()
+            self.assertIn("Device does not support `appops`", str(cm.exception))
+
+    @patch("optimizer.subprocess.run")
+    def test_experimental_optimizations_refuse_when_sdk_too_old(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "ro.build.version.sdk" in cmd:
+                return MagicMock(returncode=0, stdout="25\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            with self.assertRaises(ValueError) as cm:
+                app.apply_experimental_optimizations()
+            self.assertIn("Device SDK 25 is too old", str(cm.exception))
+
+    @patch("optimizer.subprocess.run")
+    def test_samsung_optimizations_still_require_samsung_brand(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = " ".join(args)
+            if "ro.product.brand" in cmd:
+                return MagicMock(returncode=0, stdout="google\n", stderr="")
+            return MagicMock(returncode=0, stdout="30\n", stderr="")
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _, _ = self.make_app_and_cli(Path(tmp))
+            with self.assertRaises(ValueError) as cm:
+                app.apply_samsung_experimental_optimizations()
+            self.assertIn("Connected device is not Samsung", str(cm.exception))
 
 
 if __name__ == "__main__":
